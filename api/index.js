@@ -5,7 +5,7 @@ const jwt = require('jsonwebtoken');
 const app = express();
 app.use(express.json());
 
-const JWT_SECRET = process.env.JWT_SECRET || 'your_jwt_secret_key';
+const JWT_SECRET = process.env.JWT_SECRET || 'secret_key';
 const MONGODB_URI =
   process.env.MONGODB_URI || 'mongodb://localhost:27017/questiondb';
 
@@ -55,6 +55,27 @@ const collections = {
   bookquestions: BookQuestion
 };
 
+app.get('/health', async (req, res) => {
+  try {
+    const dbStatus =
+      mongoose.connection.readyState === 1
+        ? 'connected'
+        : 'disconnected';
+
+    res.status(200).json({
+      status: 'healthy',
+      timestamp: new Date().toISOString(),
+      uptime: process.uptime(),
+      database: dbStatus,
+      environment: process.env.NODE_ENV || 'development'
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'unhealthy',
+      error: error.message
+    });
+  }
+});
 // Admin Login
 app.post('/api/login', async (req, res) => {
   const { admin_id, admin_pass } = req.body;
