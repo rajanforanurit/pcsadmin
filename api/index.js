@@ -1,10 +1,8 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
-
 const app = express();
 app.use(express.json());
-
 const JWT_SECRET = process.env.JWT_SECRET || 'secret_key';
 const MONGODB_URI =
   process.env.MONGODB_URI || 'mongodb://localhost:27017/questiondb';
@@ -17,6 +15,15 @@ async function connectDB() {
   await mongoose.connect(MONGODB_URI);
   isConnected = true;
 }
+
+(async () => {
+  try {
+    await connectDB();
+    console.log('MongoDB Connected');
+  } catch (err) {
+    console.error('MongoDB Connection Error:', err);
+  }
+})();
 
 const QuestionSchema = new mongoose.Schema({
   id: Number,
@@ -55,28 +62,6 @@ const collections = {
   bookquestions: BookQuestion
 };
 
-app.get('/health', async (req, res) => {
-  try {
-    const dbStatus =
-      mongoose.connection.readyState === 1
-        ? 'connected'
-        : 'disconnected';
-
-    res.status(200).json({
-      status: 'healthy',
-      timestamp: new Date().toISOString(),
-      uptime: process.uptime(),
-      database: dbStatus,
-      environment: process.env.NODE_ENV || 'development'
-    });
-  } catch (error) {
-    res.status(500).json({
-      status: 'unhealthy',
-      error: error.message
-    });
-  }
-});
-// Admin Login
 app.post('/api/login', async (req, res) => {
   const { admin_id, admin_pass } = req.body;
 
@@ -95,7 +80,6 @@ app.post('/api/login', async (req, res) => {
   });
 });
 
-// Auth Middleware
 const authMiddleware = (req, res, next) => {
   const token = req.headers.authorization?.split(' ')[1];
 
@@ -115,7 +99,41 @@ const authMiddleware = (req, res, next) => {
   }
 };
 
-// Create Questions
+app.get('/live', (req, res) => {
+  res.status(200).json({
+    status: 'alive',
+    timestamp: new Date().toISOString()
+  });
+});
+
+app.get('/ready', (req, res) => {
+  const dbConnected = mongoose.connection.readyState === 1;
+
+  if (!dbConnected) {
+    return res.status(503).json({
+      status: 'not_ready',
+      database: 'disconnected'
+    });
+  }
+
+  res.status(200).json({
+    status: 'ready',
+    database: 'connected'
+  });
+});
+
+app.get('/health', (req, res) => {
+  const dbConnected = mongoose.connection.readyState === 1;
+
+  res.status(dbConnected ? 200 : 503).json({
+    status: dbConnected ? 'healthy' : 'unhealthy',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    database: dbConnected ? 'connected' : 'disconnected',
+    environment: process.env.NODE_ENV || 'production'
+  });
+});
+
 app.post(
   '/api/admin/questions/:collection',
   authMiddleware,
@@ -157,7 +175,6 @@ app.post(
   }
 );
 
-// Get Questions
 app.get(
   '/api/admin/questions/:collection',
   authMiddleware,
@@ -174,11 +191,11 @@ app.get(
     }
 
     const questions = await Model.find();
+
     res.json(questions);
   }
 );
 
-// Update Question
 app.patch(
   '/api/admin/questions/:collection/:id',
   authMiddleware,
@@ -210,7 +227,6 @@ app.patch(
   }
 );
 
-// Delete Question
 app.delete(
   '/api/admin/questions/:collection/:id',
   authMiddleware,
