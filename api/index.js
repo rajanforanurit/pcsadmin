@@ -4,27 +4,20 @@ const jwt = require('jsonwebtoken');
 
 const app = express();
 app.use(express.json());
-
-// Environment variables with fallbacks (for local dev)
 const JWT_SECRET = process.env.JWT_SECRET || 'secret_key';
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/questiondb';
-
-// Global connection cache for Vercel serverless (important!)
 let cachedConnection = null;
 
 async function connectDB() {
   if (cachedConnection) {
     return cachedConnection;
   }
-
   try {
     const connection = await mongoose.connect(MONGODB_URI, {
-      // Serverless-friendly options
       serverSelectionTimeoutMS: 5000,
       socketTimeoutMS: 45000,
-      maxPoolSize: 5, // Keep low for serverless
+      maxPoolSize: 5,
     });
-    
     cachedConnection = connection;
     console.log('MongoDB Connected Successfully');
     return connection;
@@ -33,40 +26,43 @@ async function connectDB() {
     throw err;
   }
 }
-
-// Models
 const QuestionSchema = new mongoose.Schema({
-  id: Number,
-  year: Number,
-  exam: String,
-  paper: String,
-  language: String,
-  question: String,
-  options: {
-    type: Object
+  exam: { type: String, required: true },
+  year: { type: Number, required: true },
+  question_no: { type: Number, required: true },
+
+  english: {
+    question: { type: String, required: true },
+    options: { type: [String], required: true }
   },
-  correct_answer: String
-}, { timestamps: true }); // Added timestamps for better tracking
 
-const HindiQuestion = mongoose.model('HindiQuestion', QuestionSchema, 'hindiquestions');
-const EnglishQuestion = mongoose.model('EnglishQuestion', QuestionSchema, 'englishquestions');
+  hindi: {
+    question: { type: String, required: true },
+    options: { type: [String], required: true }
+  },
+
+  marks: { type: Number, default: 2 },
+  negativeMarks: { type: Number, default: 0.66 },
+  answer: { type: Number, default: null },
+  paper: String,
+  subject: String,
+  topic: String
+}, { 
+  timestamps: true 
+});
+
+const PcsQuestion = mongoose.model('PcsQuestion', QuestionSchema, 'pcsquestions');
 const BookQuestion = mongoose.model('BookQuestion', QuestionSchema, 'bookquestions');
-
 const collections = {
-  hindiquestions: HindiQuestion,
-  englishquestions: EnglishQuestion,
+  pcsquestions: PcsQuestion,
   bookquestions: BookQuestion
 };
-
-// Auth Middleware
 const authMiddleware = (req, res, next) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return res.status(401).json({ error: 'No token provided' });
   }
-
   const token = authHeader.split(' ')[1];
-
   try {
     jwt.verify(token, JWT_SECRET);
     next();
@@ -74,8 +70,6 @@ const authMiddleware = (req, res, next) => {
     return res.status(401).json({ error: 'Invalid token' });
   }
 };
-
-// Public routes (no auth)
 app.get('/live', (req, res) => {
   res.status(200).json({
     status: 'alive',
@@ -87,16 +81,9 @@ app.get('/ready', async (req, res) => {
   try {
     await connectDB();
     const dbConnected = mongoose.connection.readyState === 1;
-    
-    if (!dbConnected) {
-      return res.status(503).json({
-        status: 'not_ready',
-        database: 'disconnected'
-      });
-    }
-    res.status(200).json({
-      status: 'ready',
-      database: 'connected'
+    res.status(dbConnected ? 200 : 503).json({
+      status: dbConnected ? 'ready' : 'not_ready',
+      database: dbConnected ? 'connected' : 'disconnected'
     });
   } catch (err) {
     res.status(503).json({
@@ -111,7 +98,6 @@ app.get('/health', async (req, res) => {
   try {
     await connectDB();
     const dbConnected = mongoose.connection.readyState === 1;
-    
     res.status(dbConnected ? 200 : 503).json({
       status: dbConnected ? 'healthy' : 'unhealthy',
       timestamp: new Date().toISOString(),
@@ -122,55 +108,45 @@ app.get('/health', async (req, res) => {
   } catch (err) {
     res.status(503).json({
       status: 'unhealthy',
-      timestamp: new Date().toISOString(),
-      database: 'disconnected',
       error: err.message
     });
   }
 });
 
-// Login route
+// ==================== AUTH ====================
 app.post('/api/login', async (req, res) => {
   const { admin_id, admin_pass } = req.body;
-
   if (admin_id === 'admin' && admin_pass === 'admin123') {
-    const token = jwt.sign(
-      { id: admin_id },
-      JWT_SECRET,
-      { expiresIn: '1h' }
-    );
+    const token = jwt.sign({ id: admin_id }, JWT_SECRET, { expiresIn: '1h' });
     return res.json({ token });
   }
-
   res.status(401).json({ error: 'Invalid credentials' });
 });
 
-// Protected Admin Routes
+// ==================== PROTECTED ADMIN ROUTES ====================
 app.post('/api/admin/questions/:collection', authMiddleware, async (req, res) => {
   try {
     await connectDB();
-    
     const { collection } = req.params;
     const Model = collections[collection];
 
     if (!Model) {
-      return res.status(400).json({ error: 'Invalid collection' });
+      return res.status(400).json({ error: 'Invalid collection. Use pcsquestions or bookquestions' });
     }
 
     const data = req.body;
 
     if (Array.isArray(data)) {
       await Model.insertMany(data);
-      return res.json({ message: 'Questions uploaded successfully' });
+      return res.json({ 
+        message: 'Questions uploaded successfully',
+        count: data.length 
+      });
     }
 
     const doc = new Model(data);
     await doc.save();
-    
-    res.json({
-      message: 'Question added successfully',
-      doc
-    });
+    res.json({ message: 'Question added successfully', doc });
   } catch (error) {
     console.error('Upload Error:', error);
     res.status(500).json({ error: error.message });
@@ -180,7 +156,6 @@ app.post('/api/admin/questions/:collection', authMiddleware, async (req, res) =>
 app.get('/api/admin/questions/:collection', authMiddleware, async (req, res) => {
   try {
     await connectDB();
-    
     const { collection } = req.params;
     const Model = collections[collection];
 
@@ -188,7 +163,17 @@ app.get('/api/admin/questions/:collection', authMiddleware, async (req, res) => 
       return res.status(400).json({ error: 'Invalid collection' });
     }
 
-    const questions = await Model.find().sort({ id: 1 });
+    const { limit = 100, skip = 0, year, exam } = req.query;
+
+    const filter = {};
+    if (year) filter.year = parseInt(year);
+    if (exam) filter.exam = exam;
+
+    const questions = await Model.find(filter)
+      .sort({ year: -1, question_no: 1 })
+      .skip(parseInt(skip))
+      .limit(parseInt(limit));
+
     res.json(questions);
   } catch (error) {
     console.error('Fetch Error:', error);
@@ -199,7 +184,6 @@ app.get('/api/admin/questions/:collection', authMiddleware, async (req, res) => 
 app.patch('/api/admin/questions/:collection/:id', authMiddleware, async (req, res) => {
   try {
     await connectDB();
-    
     const { collection, id } = req.params;
     const Model = collections[collection];
 
@@ -207,8 +191,8 @@ app.patch('/api/admin/questions/:collection/:id', authMiddleware, async (req, re
       return res.status(400).json({ error: 'Invalid collection' });
     }
 
-    const updated = await Model.findOneAndUpdate(
-      { id: parseInt(id) },
+    const updated = await Model.findByIdAndUpdate(
+      id,
       req.body,
       { new: true, runValidators: true }
     );
@@ -227,7 +211,6 @@ app.patch('/api/admin/questions/:collection/:id', authMiddleware, async (req, re
 app.delete('/api/admin/questions/:collection/:id', authMiddleware, async (req, res) => {
   try {
     await connectDB();
-    
     const { collection, id } = req.params;
     const Model = collections[collection];
 
@@ -235,8 +218,7 @@ app.delete('/api/admin/questions/:collection/:id', authMiddleware, async (req, r
       return res.status(400).json({ error: 'Invalid collection' });
     }
 
-    const deleted = await Model.findOneAndDelete({ id: parseInt(id) });
-
+    const deleted = await Model.findByIdAndDelete(id);
     if (!deleted) {
       return res.status(404).json({ error: 'Question not found' });
     }
@@ -247,6 +229,4 @@ app.delete('/api/admin/questions/:collection/:id', authMiddleware, async (req, r
     res.status(500).json({ error: error.message });
   }
 });
-
-// For Vercel serverless
 module.exports = app;
