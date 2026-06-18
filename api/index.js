@@ -45,21 +45,21 @@ async function getNextSequence(collectionName, count = 1) {
     { $inc: { seq: count } },
     { new: true, upsert: true }
   );
-  return result.seq - count + 1; 
+  return result.seq - count + 1;
 }
 
 const QuestionSchema = new mongoose.Schema({
-  _id: { type: Number },              
+  _id: { type: Number },
   exam: { type: String, required: true },
   year: { type: Number, required: true },
-  paper: { type: String },             
-  subject: { 
-    type: String, 
-    required: true,                         
-    trim: true 
+  paper: { type: String },
+  subject: {
+    type: String,
+    required: true,
+    trim: true
   },
   topic: { type: String, trim: true },
-  
+ 
   english: {
     question: { type: String, required: true },
     options: { type: Object, required: true }
@@ -68,13 +68,13 @@ const QuestionSchema = new mongoose.Schema({
     question: { type: String, required: true },
     options: { type: Object, required: true }
   },
-  
+ 
   marks: { type: Number, default: 2 },
   negativeMarks: { type: Number, default: 0.66 },
   correct_answer: { type: Number, required: true },
-  
+ 
   batchId: { type: String }
-}, { 
+}, {
   timestamps: true,
   collection: 'pcsquestions'
 });
@@ -99,12 +99,43 @@ const authMiddleware = (req, res, next) => {
     return res.status(401).json({ error: 'Invalid token' });
   }
 };
+app.get('/api/admin/questions/:collection/batch/:batchId/full', authMiddleware, async (req, res) => {
+  try {
+    await connectDB();
+    const { collection, batchId } = req.params;
+    const Model = collections[collection];
+   
+    if (!Model) return res.status(400).json({ error: 'Invalid collection' });
+
+    const questions = await Model.find({ batchId }).sort({ _id: 1 });
+
+    if (questions.length === 0) {
+      return res.status(404).json({ error: 'Batch not found or empty' });
+    }
+
+    // Return clean JSON in the same format as upload (without server-generated fields)
+    const cleanBatch = questions.map(q => {
+      const { _id, batchId, createdAt, updatedAt, __v, ...cleanQuestion } = q.toObject();
+      return cleanQuestion;
+    });
+
+    res.json({
+      message: 'Batch JSON retrieved successfully',
+      batchId,
+      count: cleanBatch.length,
+      questions: cleanBatch
+    });
+  } catch (error) {
+    console.error('Fetch Full Batch Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
 app.post('/api/admin/questions/:collection', authMiddleware, async (req, res) => {
   try {
     await connectDB();
     const { collection } = req.params;
     const Model = collections[collection];
-    
+   
     if (!Model) return res.status(400).json({ error: 'Invalid collection' });
 
     const data = req.body;
@@ -114,20 +145,17 @@ app.post('/api/admin/questions/:collection', authMiddleware, async (req, res) =>
       if (data.length === 0) return res.json({ message: 'No questions', count: 0 });
 
       const startId = await getNextSequence(collection, data.length);
-
       const preparedQuestions = data.map((q, index) => {
         const { _id, question_id, id, ...rest } = q;
         return {
           ...rest,
           _id: startId + index,
           batchId,
-          // Ensure subject is present (fallback if needed)
           subject: rest.subject || 'Uncategorized'
         };
       });
 
       const inserted = await Model.insertMany(preparedQuestions);
-
       return res.json({
         message: 'Questions uploaded successfully',
         count: data.length,
@@ -139,14 +167,12 @@ app.post('/api/admin/questions/:collection', authMiddleware, async (req, res) =>
     // Single question
     const startId = await getNextSequence(collection, 1);
     const { _id, question_id, id, ...rest } = data;
-
     const doc = new Model({
       ...rest,
       _id: startId,
       batchId,
       subject: rest.subject || 'Uncategorized'
     });
-
     await doc.save();
 
     res.json({
@@ -154,12 +180,12 @@ app.post('/api/admin/questions/:collection', authMiddleware, async (req, res) =>
       doc,
       generatedId: startId
     });
-
   } catch (error) {
     console.error('Upload Error:', error);
     res.status(500).json({ error: error.message });
   }
 });
+
 app.get('/api/admin/questions/:collection', authMiddleware, async (req, res) => {
   try {
     await connectDB();
@@ -168,7 +194,6 @@ app.get('/api/admin/questions/:collection', authMiddleware, async (req, res) => 
     if (!Model) return res.status(400).json({ error: 'Invalid collection' });
 
     const { limit = 100, skip = 0, year, exam, subject, batchId } = req.query;
-
     const filter = {};
     if (year) filter.year = parseInt(year);
     if (exam) filter.exam = exam;
@@ -210,11 +235,11 @@ app.patch('/api/admin/questions/:collection/:id', authMiddleware, async (req, re
     if (!Model) return res.status(400).json({ error: 'Invalid collection' });
 
     const updated = await Model.findByIdAndUpdate(
-      parseInt(id), 
-      req.body, 
+      parseInt(id),
+      req.body,
       { new: true, runValidators: true }
     );
-    
+   
     if (!updated) return res.status(404).json({ error: 'Question not found' });
     res.json(updated);
   } catch (error) {
