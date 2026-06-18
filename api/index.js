@@ -4,10 +4,11 @@ const jwt = require('jsonwebtoken');
 const cors = require('cors');   // ← Added
 
 const app = express();
-
-// ==================== CORS FIX FOR VERCEL ====================
 app.use(cors({
-  origin: ['https://pcsadmportal.vercel.app', 'http://localhost:3000', '*'], // Add your frontend URL
+  origin: [
+    'https://pcsadmportal.vercel.app',
+    'http://localhost:3000'
+  ],
   methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true
@@ -38,33 +39,66 @@ async function connectDB() {
     throw err;
   }
 }
-
-// ==================== SCHEMA ====================
 const QuestionSchema = new mongoose.Schema({
-  exam: { type: String, required: true },
-  year: { type: Number, required: true },
-  question_no: { type: Number, required: true },
-
+  _id: {
+    type: Number
+  },
+  exam: {
+    type: String,
+    required: true
+  },
+  year: {
+    type: Number,
+    required: true
+  },
   english: {
-    question: { type: String, required: true },
-    options: { type: [String], required: true }
+    question: {
+      type: String,
+      required: true
+    },
+    options: {
+      type: Object,
+      required: true
+    }
   },
 
   hindi: {
-    question: { type: String, required: true },
-    options: { type: [String], required: true }
+    question: {
+      type: String,
+      required: true
+    },
+    options: {
+      type: Object,
+      required: true
+    }
+  },
+  marks: {
+    type: Number,
+    default: 2
   },
 
-  marks: { type: Number, default: 2 },
-  negativeMarks: { type: Number, default: 0.66 },
-  answer: { type: Number, default: null },
+  negativeMarks: {
+    type: Number,
+    default: 0.66
+  },
+  correct_answer: {
+    type: Number,
+    required: true
+  },
+  paper: {
+    type: String
+  },
 
-  paper: String,
-  subject: String,
-  topic: String
-}, { timestamps: true });
+  subject: {
+    type: String
+  },
 
-// Models
+  topic: {
+    type: String
+  }
+}, {
+  timestamps: true
+});
 const PcsQuestion = mongoose.model('PcsQuestion', QuestionSchema, 'pcsquestions');
 const BookQuestion = mongoose.model('BookQuestion', QuestionSchema, 'bookquestions');
 
