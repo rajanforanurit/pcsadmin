@@ -1,17 +1,29 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
+const cors = require('cors');   // ← Added
 
 const app = express();
+
+// ==================== CORS FIX FOR VERCEL ====================
+app.use(cors({
+  origin: ['https://pcsadmportal.vercel.app', 'http://localhost:3000', '*'], // Add your frontend URL
+  methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
+}));
+
 app.use(express.json());
+
+// Environment variables
 const JWT_SECRET = process.env.JWT_SECRET || 'secret_key';
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/questiondb';
+
+// Global connection cache
 let cachedConnection = null;
 
 async function connectDB() {
-  if (cachedConnection) {
-    return cachedConnection;
-  }
+  if (cachedConnection) return cachedConnection;
   try {
     const connection = await mongoose.connect(MONGODB_URI, {
       serverSelectionTimeoutMS: 5000,
@@ -26,6 +38,8 @@ async function connectDB() {
     throw err;
   }
 }
+
+// ==================== SCHEMA ====================
 const QuestionSchema = new mongoose.Schema({
   exam: { type: String, required: true },
   year: { type: Number, required: true },
@@ -44,85 +58,59 @@ const QuestionSchema = new mongoose.Schema({
   marks: { type: Number, default: 2 },
   negativeMarks: { type: Number, default: 0.66 },
   answer: { type: Number, default: null },
+
   paper: String,
   subject: String,
   topic: String
-}, { 
-  timestamps: true 
-});
+}, { timestamps: true });
 
+// Models
 const PcsQuestion = mongoose.model('PcsQuestion', QuestionSchema, 'pcsquestions');
 const BookQuestion = mongoose.model('BookQuestion', QuestionSchema, 'bookquestions');
+
 const collections = {
   pcsquestions: PcsQuestion,
   bookquestions: BookQuestion
 };
+
+// Auth Middleware
 const authMiddleware = (req, res, next) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return res.status(401).json({ error: 'No token provided' });
   }
-  const token = authHeader.split(' ')[1];
   try {
-    jwt.verify(token, JWT_SECRET);
+    jwt.verify(authHeader.split(' ')[1], JWT_SECRET);
     next();
   } catch (error) {
     return res.status(401).json({ error: 'Invalid token' });
   }
 };
-app.get('/live', (req, res) => {
-  res.status(200).json({
-    status: 'alive',
-    timestamp: new Date().toISOString()
-  });
-});
 
-app.get('/ready', async (req, res) => {
-  try {
-    await connectDB();
-    const dbConnected = mongoose.connection.readyState === 1;
-    res.status(dbConnected ? 200 : 503).json({
-      status: dbConnected ? 'ready' : 'not_ready',
-      database: dbConnected ? 'connected' : 'disconnected'
-    });
-  } catch (err) {
-    res.status(503).json({
-      status: 'not_ready',
-      database: 'error',
-      error: err.message
-    });
-  }
-});
+// ==================== ROUTES ====================
+app.get('/live', (req, res) => res.status(200).json({ status: 'alive' }));
 
 app.get('/health', async (req, res) => {
   try {
     await connectDB();
-    const dbConnected = mongoose.connection.readyState === 1;
-    res.status(dbConnected ? 200 : 503).json({
-      status: dbConnected ? 'healthy' : 'unhealthy',
-      timestamp: new Date().toISOString(),
-      uptime: process.uptime(),
-      database: dbConnected ? 'connected' : 'disconnected',
-      environment: process.env.NODE_ENV || 'production'
-    });
+    res.status(200).json({ status: 'healthy' });
   } catch (err) {
-    res.status(503).json({
-      status: 'unhealthy',
-      error: err.message
-    });
+    res.status(503).json({ status: 'unhealthy' });
   }
 });
 
-// ==================== AUTH ====================
+// Login (Hardcoded - you can change later)
 app.post('/api/login', async (req, res) => {
   const { admin_id, admin_pass } = req.body;
+  
+  // Hardcoded credentials (as requested)
   if (admin_id === 'admin' && admin_pass === 'admin123') {
     const token = jwt.sign({ id: admin_id }, JWT_SECRET, { expiresIn: '1h' });
     return res.json({ token });
   }
+  
   res.status(401).json({ error: 'Invalid credentials' });
 });
-
 // ==================== PROTECTED ADMIN ROUTES ====================
 app.post('/api/admin/questions/:collection', authMiddleware, async (req, res) => {
   try {
