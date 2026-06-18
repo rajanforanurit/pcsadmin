@@ -31,6 +31,7 @@ async function connectDB() {
   return connection;
 }
 
+// ====================== COUNTER ======================
 const CounterSchema = new mongoose.Schema({
   _id: { type: String, required: true },
   seq: { type: Number, default: 0 }
@@ -38,7 +39,6 @@ const CounterSchema = new mongoose.Schema({
 
 const Counter = mongoose.model('Counter', CounterSchema);
 
-// Get next N sequential IDs atomically
 async function getNextSequence(collectionName, count = 1) {
   const result = await Counter.findOneAndUpdate(
     { _id: `questions_${collectionName}` },
@@ -48,6 +48,7 @@ async function getNextSequence(collectionName, count = 1) {
   return result.seq - count + 1;
 }
 
+//question schema
 const QuestionSchema = new mongoose.Schema({
   _id: { type: Number },
   exam: { type: String, required: true },
@@ -59,7 +60,14 @@ const QuestionSchema = new mongoose.Schema({
     trim: true
   },
   topic: { type: String, trim: true },
- 
+
+  //optional
+  imageUrl: {
+    type: String,
+    trim: true,
+    default: null
+  },
+
   english: {
     question: { type: String, required: true },
     options: { type: Object, required: true }
@@ -68,25 +76,24 @@ const QuestionSchema = new mongoose.Schema({
     question: { type: String, required: true },
     options: { type: Object, required: true }
   },
- 
   marks: { type: Number, default: 2 },
   negativeMarks: { type: Number, default: 0.66 },
   correct_answer: { type: Number, required: true },
- 
   batchId: { type: String }
 }, {
   timestamps: true,
-  collection: 'pcsquestions'
 });
 
+// here i make three collections , paragraph question can't fit in normal question schema so I make new collection
 const PcsQuestion = mongoose.model('PcsQuestion', QuestionSchema, 'pcsquestions');
 const BookQuestion = mongoose.model('BookQuestion', QuestionSchema, 'bookquestions');
+const ParagraphQuestion = mongoose.model('ParagraphQuestion', QuestionSchema, 'paragraphquestions');
 
 const collections = {
   pcsquestions: PcsQuestion,
-  bookquestions: BookQuestion
+  bookquestions: BookQuestion,
+  paragraphquestions: ParagraphQuestion
 };
-
 const authMiddleware = (req, res, next) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -104,16 +111,15 @@ app.get('/api/admin/questions/:collection/batch/:batchId/full', authMiddleware, 
     await connectDB();
     const { collection, batchId } = req.params;
     const Model = collections[collection];
-   
+  
     if (!Model) return res.status(400).json({ error: 'Invalid collection' });
-
+    
     const questions = await Model.find({ batchId }).sort({ _id: 1 });
-
+    
     if (questions.length === 0) {
       return res.status(404).json({ error: 'Batch not found or empty' });
     }
 
-    // Return clean JSON in the same format as upload (without server-generated fields)
     const cleanBatch = questions.map(q => {
       const { _id, batchId, createdAt, updatedAt, __v, ...cleanQuestion } = q.toObject();
       return cleanQuestion;
@@ -130,12 +136,13 @@ app.get('/api/admin/questions/:collection/batch/:batchId/full', authMiddleware, 
     res.status(500).json({ error: error.message });
   }
 });
+
 app.post('/api/admin/questions/:collection', authMiddleware, async (req, res) => {
   try {
     await connectDB();
     const { collection } = req.params;
     const Model = collections[collection];
-   
+  
     if (!Model) return res.status(400).json({ error: 'Invalid collection' });
 
     const data = req.body;
@@ -143,8 +150,8 @@ app.post('/api/admin/questions/:collection', authMiddleware, async (req, res) =>
 
     if (Array.isArray(data)) {
       if (data.length === 0) return res.json({ message: 'No questions', count: 0 });
-
       const startId = await getNextSequence(collection, data.length);
+      
       const preparedQuestions = data.map((q, index) => {
         const { _id, question_id, id, ...rest } = q;
         return {
@@ -155,7 +162,8 @@ app.post('/api/admin/questions/:collection', authMiddleware, async (req, res) =>
         };
       });
 
-      const inserted = await Model.insertMany(preparedQuestions);
+      await Model.insertMany(preparedQuestions);
+      
       return res.json({
         message: 'Questions uploaded successfully',
         count: data.length,
@@ -164,20 +172,20 @@ app.post('/api/admin/questions/:collection', authMiddleware, async (req, res) =>
       });
     }
 
-    // Single question
     const startId = await getNextSequence(collection, 1);
     const { _id, question_id, id, ...rest } = data;
+    
     const doc = new Model({
       ...rest,
       _id: startId,
       batchId,
       subject: rest.subject || 'Uncategorized'
     });
-    await doc.save();
 
+    await doc.save();
+    
     res.json({
       message: 'Question added successfully',
-      doc,
       generatedId: startId
     });
   } catch (error) {
@@ -194,6 +202,7 @@ app.get('/api/admin/questions/:collection', authMiddleware, async (req, res) => 
     if (!Model) return res.status(400).json({ error: 'Invalid collection' });
 
     const { limit = 100, skip = 0, year, exam, subject, batchId } = req.query;
+    
     const filter = {};
     if (year) filter.year = parseInt(year);
     if (exam) filter.exam = exam;
@@ -221,6 +230,7 @@ app.get('/api/admin/questions/:collection/:id', authMiddleware, async (req, res)
 
     const question = await Model.findById(parseInt(id));
     if (!question) return res.status(404).json({ error: 'Question not found' });
+
     res.json(question);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -239,7 +249,7 @@ app.patch('/api/admin/questions/:collection/:id', authMiddleware, async (req, re
       req.body,
       { new: true, runValidators: true }
     );
-   
+  
     if (!updated) return res.status(404).json({ error: 'Question not found' });
     res.json(updated);
   } catch (error) {
@@ -256,6 +266,7 @@ app.delete('/api/admin/questions/:collection/:id', authMiddleware, async (req, r
 
     const deleted = await Model.findByIdAndDelete(parseInt(id));
     if (!deleted) return res.status(404).json({ error: 'Question not found' });
+    
     res.json({ message: 'Question deleted successfully' });
   } catch (error) {
     res.status(500).json({ error: error.message });
