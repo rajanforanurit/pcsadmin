@@ -2,6 +2,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const cors = require('cors');
+
 const app = express();
 app.use(cors({
   origin: ['https://pcsadmportal.vercel.app', 'http://localhost:3000'],
@@ -88,6 +89,8 @@ app.post('/api/login', async (req, res) => {
   res.status(401).json({ error: 'Invalid credentials' });
 });
 
+// ==================== PROTECTED ROUTES ====================
+
 app.post('/api/admin/questions/:collection', authMiddleware, async (req, res) => {
   try {
     await connectDB();
@@ -99,7 +102,7 @@ app.post('/api/admin/questions/:collection', authMiddleware, async (req, res) =>
     const batchId = 'batch_' + Date.now();
 
     if (Array.isArray(data)) {
-      const questionsWithBatch = data.map((q, index) => ({
+      const questionsWithBatch = data.map(q => ({
         ...q,
         batchId,
         _id: q._id || undefined
@@ -117,6 +120,7 @@ app.post('/api/admin/questions/:collection', authMiddleware, async (req, res) =>
   }
 });
 
+// Get all questions
 app.get('/api/admin/questions/:collection', authMiddleware, async (req, res) => {
   try {
     await connectDB();
@@ -138,6 +142,24 @@ app.get('/api/admin/questions/:collection', authMiddleware, async (req, res) => 
     res.json(questions);
   } catch (error) {
     console.error('Fetch Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// NEW: Get single question by ID
+app.get('/api/admin/questions/:collection/:id', authMiddleware, async (req, res) => {
+  try {
+    await connectDB();
+    const { collection, id } = req.params;
+    const Model = collections[collection];
+    if (!Model) return res.status(400).json({ error: 'Invalid collection' });
+
+    const question = await Model.findById(id);
+    if (!question) return res.status(404).json({ error: 'Question not found' });
+
+    res.json(question);
+  } catch (error) {
+    console.error('Single Fetch Error:', error);
     res.status(500).json({ error: error.message });
   }
 });
