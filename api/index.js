@@ -2,7 +2,9 @@ const express = require('express');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const cors = require('cors');
+
 const app = express();
+
 app.use(cors({
   origin: ['https://pcsadmportal.vercel.app', 'http://localhost:3000'],
   methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
@@ -11,8 +13,10 @@ app.use(cors({
 }));
 
 app.use(express.json());
+
 const JWT_SECRET = process.env.JWT_SECRET || 'secret_key';
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/questiondb';
+
 let cachedConnection = null;
 
 async function connectDB() {
@@ -26,6 +30,7 @@ async function connectDB() {
   console.log('MongoDB Connected Successfully');
   return connection;
 }
+
 const CounterSchema = new mongoose.Schema({
   _id: { type: String, required: true },
   seq: { type: Number, default: 0 }
@@ -40,14 +45,21 @@ async function getNextSequence(collectionName, count = 1) {
     { $inc: { seq: count } },
     { new: true, upsert: true }
   );
-  return result.seq - count + 1; // starting ID
+  return result.seq - count + 1; 
 }
 
 const QuestionSchema = new mongoose.Schema({
-  _id: { type: Number },  
+  _id: { type: Number },              
   exam: { type: String, required: true },
   year: { type: Number, required: true },
-  paper: { type: String },
+  paper: { type: String },             
+  subject: { 
+    type: String, 
+    required: true,                         
+    trim: true 
+  },
+  topic: { type: String, trim: true },
+  
   english: {
     question: { type: String, required: true },
     options: { type: Object, required: true }
@@ -56,13 +68,16 @@ const QuestionSchema = new mongoose.Schema({
     question: { type: String, required: true },
     options: { type: Object, required: true }
   },
+  
   marks: { type: Number, default: 2 },
   negativeMarks: { type: Number, default: 0.66 },
   correct_answer: { type: Number, required: true },
-  subject: { type: String },
-  topic: { type: String },
+  
   batchId: { type: String }
-}, { timestamps: true });
+}, { 
+  timestamps: true,
+  collection: 'pcsquestions'
+});
 
 const PcsQuestion = mongoose.model('PcsQuestion', QuestionSchema, 'pcsquestions');
 const BookQuestion = mongoose.model('BookQuestion', QuestionSchema, 'bookquestions');
@@ -72,7 +87,6 @@ const collections = {
   bookquestions: BookQuestion
 };
 
-// ==================== AUTH MIDDLEWARE ====================
 const authMiddleware = (req, res, next) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -85,13 +99,12 @@ const authMiddleware = (req, res, next) => {
     return res.status(401).json({ error: 'Invalid token' });
   }
 };
-
-// ==================== UPLOAD ROUTE (MAIN FIX) ====================
 app.post('/api/admin/questions/:collection', authMiddleware, async (req, res) => {
   try {
     await connectDB();
     const { collection } = req.params;
     const Model = collections[collection];
+    
     if (!Model) return res.status(400).json({ error: 'Invalid collection' });
 
     const data = req.body;
@@ -103,12 +116,13 @@ app.post('/api/admin/questions/:collection', authMiddleware, async (req, res) =>
       const startId = await getNextSequence(collection, data.length);
 
       const preparedQuestions = data.map((q, index) => {
-        // Completely ignore any incoming ID
         const { _id, question_id, id, ...rest } = q;
         return {
           ...rest,
           _id: startId + index,
-          batchId
+          batchId,
+          // Ensure subject is present (fallback if needed)
+          subject: rest.subject || 'Uncategorized'
         };
       });
 
@@ -129,7 +143,8 @@ app.post('/api/admin/questions/:collection', authMiddleware, async (req, res) =>
     const doc = new Model({
       ...rest,
       _id: startId,
-      batchId
+      batchId,
+      subject: rest.subject || 'Uncategorized'
     });
 
     await doc.save();
@@ -145,8 +160,6 @@ app.post('/api/admin/questions/:collection', authMiddleware, async (req, res) =>
     res.status(500).json({ error: error.message });
   }
 });
-
-// ==================== OTHER ROUTES (Updated with parseInt) ====================
 app.get('/api/admin/questions/:collection', authMiddleware, async (req, res) => {
   try {
     await connectDB();
@@ -154,10 +167,12 @@ app.get('/api/admin/questions/:collection', authMiddleware, async (req, res) => 
     const Model = collections[collection];
     if (!Model) return res.status(400).json({ error: 'Invalid collection' });
 
-    const { limit = 100, skip = 0, year, exam, batchId } = req.query;
+    const { limit = 100, skip = 0, year, exam, subject, batchId } = req.query;
+
     const filter = {};
     if (year) filter.year = parseInt(year);
     if (exam) filter.exam = exam;
+    if (subject) filter.subject = subject;
     if (batchId) filter.batchId = batchId;
 
     const questions = await Model.find(filter)
@@ -194,7 +209,12 @@ app.patch('/api/admin/questions/:collection/:id', authMiddleware, async (req, re
     const Model = collections[collection];
     if (!Model) return res.status(400).json({ error: 'Invalid collection' });
 
-    const updated = await Model.findByIdAndUpdate(parseInt(id), req.body, { new: true, runValidators: true });
+    const updated = await Model.findByIdAndUpdate(
+      parseInt(id), 
+      req.body, 
+      { new: true, runValidators: true }
+    );
+    
     if (!updated) return res.status(404).json({ error: 'Question not found' });
     res.json(updated);
   } catch (error) {
