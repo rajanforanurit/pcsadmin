@@ -4,32 +4,54 @@ const jwt = require('jsonwebtoken');
 const cors = require('cors');
 
 const app = express();
+
 app.use(cors({
   origin: ['https://pcsadmportal.vercel.app', 'http://localhost:3000'],
   methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true
 }));
+
 app.use(express.json());
 
 const JWT_SECRET = process.env.JWT_SECRET || 'secret_key';
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/questiondb';
 
 let cachedConnection = null;
+
 async function connectDB() {
   if (cachedConnection) return cachedConnection;
   const connection = await mongoose.connect(MONGODB_URI, {
     serverSelectionTimeoutMS: 5000,
     socketTimeoutMS: 45000,
-    maxPoolSize: 5,
+    maxPoolSize: 10,
   });
   cachedConnection = connection;
   console.log('MongoDB Connected Successfully');
   return connection;
 }
 
+// ==================== COUNTER FOR ATOMIC ID GENERATION ====================
+const CounterSchema = new mongoose.Schema({
+  _id: { type: String, required: true },
+  seq: { type: Number, default: 0 }
+});
+
+const Counter = mongoose.model('Counter', CounterSchema);
+
+// Atomic function to get next sequence number(s) for a collection
+async function getNextSequence(collectionName, count = 1) {
+  const counter = await Counter.findOneAndUpdate(
+    { _id: collectionName },
+    { $inc: { seq: count } },
+    { new: true, upsert: true }
+  );
+  return counter.seq - count + 1; // starting ID for the batch
+}
+
+// ==================== SCHEMAS & MODELS ====================
 const QuestionSchema = new mongoose.Schema({
-  _id: { type: Number },
+  _id: { type: Number }, // Auto-generated sequential ID
   exam: { type: String, required: true },
   year: { type: Number, required: true },
   paper: { type: String },
@@ -57,6 +79,7 @@ const collections = {
   bookquestions: BookQuestion
 };
 
+// ==================== MIDDLEWARE ====================
 const authMiddleware = (req, res, next) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -70,7 +93,9 @@ const authMiddleware = (req, res, next) => {
   }
 };
 
+// ==================== ROUTES ====================
 app.get('/live', (req, res) => res.status(200).json({ status: 'alive' }));
+
 app.get('/health', async (req, res) => {
   try {
     await connectDB();
@@ -90,7 +115,6 @@ app.post('/api/login', async (req, res) => {
 });
 
 // ==================== PROTECTED ROUTES ====================
-
 app.post('/api/admin/questions/:collection', authMiddleware, async (req, res) => {
   try {
     await connectDB();
@@ -102,18 +126,50 @@ app.post('/api/admin/questions/:collection', authMiddleware, async (req, res) =>
     const batchId = 'batch_' + Date.now();
 
     if (Array.isArray(data)) {
-      const questionsWithBatch = data.map(q => ({
-        ...q,
-        batchId,
-        _id: q._id || undefined
-      }));
+      if (data.length === 0) {
+        return res.json({ message: 'No questions to upload', count: 0 });
+      }
+
+      // Atomically get next sequential IDs for the entire batch
+      const startId = await getNextSequence(collection, data.length);
+
+      const questionsWithBatch = data.map((q, index) => {
+        // Ignore any question_id / _id coming from the uploaded file
+        const { _id: ignoredId, question_id: ignoredQId, ...rest } = q;
+        return {
+          ...rest,
+          _id: startId + index,
+          batchId
+        };
+      });
+
       await Model.insertMany(questionsWithBatch);
-      return res.json({ message: 'Questions uploaded successfully', count: data.length, batchId });
+
+      return res.json({ 
+        message: 'Questions uploaded successfully', 
+        count: data.length, 
+        batchId,
+        idRange: { start: startId, end: startId + data.length - 1 }
+      });
     }
 
-    const doc = new Model({ ...data, batchId });
+    // Single question upload
+    const startId = await getNextSequence(collection, 1);
+    const { _id: ignoredId, question_id: ignoredQId, ...rest } = data;
+    
+    const doc = new Model({ 
+      ...rest, 
+      _id: startId, 
+      batchId 
+    });
+    
     await doc.save();
-    res.json({ message: 'Question added successfully', doc });
+    
+    res.json({ 
+      message: 'Question added successfully', 
+      doc,
+      generatedId: startId 
+    });
   } catch (error) {
     console.error('Upload Error:', error);
     res.status(500).json({ error: error.message });
@@ -146,7 +202,7 @@ app.get('/api/admin/questions/:collection', authMiddleware, async (req, res) => 
   }
 });
 
-// NEW: Get single question by ID
+// Get single question by ID
 app.get('/api/admin/questions/:collection/:id', authMiddleware, async (req, res) => {
   try {
     await connectDB();
@@ -154,7 +210,7 @@ app.get('/api/admin/questions/:collection/:id', authMiddleware, async (req, res)
     const Model = collections[collection];
     if (!Model) return res.status(400).json({ error: 'Invalid collection' });
 
-    const question = await Model.findById(id);
+    const question = await Model.findById(parseInt(id));
     if (!question) return res.status(404).json({ error: 'Question not found' });
 
     res.json(question);
@@ -171,7 +227,12 @@ app.patch('/api/admin/questions/:collection/:id', authMiddleware, async (req, re
     const Model = collections[collection];
     if (!Model) return res.status(400).json({ error: 'Invalid collection' });
 
-    const updated = await Model.findByIdAndUpdate(id, req.body, { new: true, runValidators: true });
+    const updated = await Model.findByIdAndUpdate(
+      parseInt(id), 
+      req.body, 
+      { new: true, runValidators: true }
+    );
+    
     if (!updated) return res.status(404).json({ error: 'Question not found' });
     res.json(updated);
   } catch (error) {
@@ -187,8 +248,9 @@ app.delete('/api/admin/questions/:collection/:id', authMiddleware, async (req, r
     const Model = collections[collection];
     if (!Model) return res.status(400).json({ error: 'Invalid collection' });
 
-    const deleted = await Model.findByIdAndDelete(id);
+    const deleted = await Model.findByIdAndDelete(parseInt(id));
     if (!deleted) return res.status(404).json({ error: 'Question not found' });
+    
     res.json({ message: 'Question deleted successfully' });
   } catch (error) {
     console.error('Delete Error:', error);
@@ -204,7 +266,10 @@ app.delete('/api/admin/questions/:collection/batch/:batchId', authMiddleware, as
     if (!Model) return res.status(400).json({ error: 'Invalid collection' });
 
     const result = await Model.deleteMany({ batchId });
-    res.json({ message: 'Batch deleted successfully', deletedCount: result.deletedCount });
+    res.json({ 
+      message: 'Batch deleted successfully', 
+      deletedCount: result.deletedCount 
+    });
   } catch (error) {
     console.error('Batch Delete Error:', error);
     res.status(500).json({ error: error.message });
