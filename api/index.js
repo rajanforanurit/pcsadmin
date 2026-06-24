@@ -79,6 +79,7 @@ const QuestionSchema = new mongoose.Schema({
   marks: { type: Number, default: 2 },
   negativeMarks: { type: Number, default: 0.66 },
   correct_answer: { type: Number, required: true },
+  explanation: {type: String, required :true},
   batchId: { type: String }
 }, {
   timestamps: true,
