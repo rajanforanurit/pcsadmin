@@ -147,6 +147,25 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok' });
 });
 
+const ADMIN_ID = process.env.ADMIN_ID || 'admin';
+const ADMIN_PASS = process.env.ADMIN_PASS || 'admin123';
+
+app.post('/api/login', (req, res) => {
+  const { admin_id, admin_pass } = req.body;
+  if (!admin_id || !admin_pass) {
+    return res.status(400).json({ error: 'Admin ID and password are required' });
+  }
+  if (admin_id !== ADMIN_ID || admin_pass !== ADMIN_PASS) {
+    return res.status(401).json({ error: 'Invalid Admin ID or password' });
+  }
+  const token = jwt.sign(
+    { admin_id, role: 'admin' },
+    JWT_SECRET,
+    { expiresIn: '7d' }
+  );
+  res.json({ message: 'Login successful', token });
+});
+
 app.get('/api/admin/questions/:collection/batch/:batchId/full', authMiddleware, async (req, res) => {
   try {
     const { Counter, PcsQuestion, BookQuestion, ParagraphQuestion } = await getQuestionModels();
