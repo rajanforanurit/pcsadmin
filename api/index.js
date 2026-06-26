@@ -16,58 +16,48 @@ app.use(express.json());
 
 const JWT_SECRET = process.env.JWT_SECRET || 'secret_key';
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/questiondb';
+const CAMONGODB_URI = process.env.CAMONGODB_URI || 'mongodb://localhost:27017/currentaffairsdb';
 
-let cachedConnection = null;
+let cachedQuestionConn = null;
+let cachedCAConn = null;
 
-async function connectDB() {
-  if (cachedConnection) return cachedConnection;
-  const connection = await mongoose.connect(MONGODB_URI, {
+async function connectQuestionDB() {
+  if (cachedQuestionConn) return cachedQuestionConn;
+  const conn = await mongoose.createConnection(MONGODB_URI, {
     serverSelectionTimeoutMS: 5000,
     socketTimeoutMS: 45000,
     maxPoolSize: 10,
-  });
-  cachedConnection = connection;
-  console.log('MongoDB Connected Successfully');
-  return connection;
+  }).asPromise();
+  cachedQuestionConn = conn;
+  console.log('Question MongoDB Connected');
+  return conn;
 }
 
-// ====================== COUNTER ======================
+async function connectCADB() {
+  if (cachedCAConn) return cachedCAConn;
+  const conn = await mongoose.createConnection(CAMONGODB_URI, {
+    serverSelectionTimeoutMS: 5000,
+    socketTimeoutMS: 45000,
+    maxPoolSize: 10,
+  }).asPromise();
+  cachedCAConn = conn;
+  console.log('Current Affairs MongoDB Connected');
+  return conn;
+}
+
 const CounterSchema = new mongoose.Schema({
   _id: { type: String, required: true },
   seq: { type: Number, default: 0 }
 }, { collection: 'counters' });
 
-const Counter = mongoose.model('Counter', CounterSchema);
-
-async function getNextSequence(collectionName, count = 1) {
-  const result = await Counter.findOneAndUpdate(
-    { _id: `questions_${collectionName}` },
-    { $inc: { seq: count } },
-    { new: true, upsert: true }
-  );
-  return result.seq - count + 1;
-}
-
-//question schema
 const QuestionSchema = new mongoose.Schema({
   _id: { type: Number },
   exam: { type: String, required: true },
   year: { type: Number, required: true },
   paper: { type: String },
-  subject: {
-    type: String,
-    required: true,
-    trim: true
-  },
+  subject: { type: String, required: true, trim: true },
   topic: { type: String, trim: true },
-
-  //optional
-  imageUrl: {
-    type: String,
-    trim: true,
-    default: null
-  },
-
+  imageUrl: { type: String, trim: true, default: null },
   english: {
     question: { type: String, required: true },
     options: { type: Object, required: true }
@@ -79,22 +69,42 @@ const QuestionSchema = new mongoose.Schema({
   marks: { type: Number, default: 2 },
   negativeMarks: { type: Number, default: 0.66 },
   correct_answer: { type: Number, required: true },
-  explanation: {type: String},
+  explanation: { type: String },
   batchId: { type: String }
-}, {
-  timestamps: true,
-});
+}, { timestamps: true });
 
-// here i make three collections , paragraph question can't fit in normal question schema so I make new collection
-const PcsQuestion = mongoose.model('PcsQuestion', QuestionSchema, 'pcsquestions');
-const BookQuestion = mongoose.model('BookQuestion', QuestionSchema, 'bookquestions');
-const ParagraphQuestion = mongoose.model('ParagraphQuestion', QuestionSchema, 'paragraphquestions');
+const CurrentAffairSchema = new mongoose.Schema({
+  title: { type: String, required: true, trim: true },
+  date: { type: String, required: true },
+  subject: { type: String, required: true, trim: true },
+  imgUrl: { type: String, trim: true, default: null },
+  overview: { type: String, required: true },
+  highlights: { type: [String], default: [] }
+}, { timestamps: true });
 
-const collections = {
-  pcsquestions: PcsQuestion,
-  bookquestions: BookQuestion,
-  paragraphquestions: ParagraphQuestion
-};
+async function getQuestionModels() {
+  const conn = await connectQuestionDB();
+  const Counter = conn.models.Counter || conn.model('Counter', CounterSchema, 'counters');
+  const PcsQuestion = conn.models.PcsQuestion || conn.model('PcsQuestion', QuestionSchema, 'pcsquestions');
+  const BookQuestion = conn.models.BookQuestion || conn.model('BookQuestion', QuestionSchema, 'bookquestions');
+  const ParagraphQuestion = conn.models.ParagraphQuestion || conn.model('ParagraphQuestion', QuestionSchema, 'paragraphquestions');
+  return { Counter, PcsQuestion, BookQuestion, ParagraphQuestion };
+}
+
+async function getCAModel() {
+  const conn = await connectCADB();
+  return conn.models.CurrentAffair || conn.model('CurrentAffair', CurrentAffairSchema, 'ca_articles');
+}
+
+async function getNextSequence(Counter, collectionName, count = 1) {
+  const result = await Counter.findOneAndUpdate(
+    { _id: `questions_${collectionName}` },
+    { $inc: { seq: count } },
+    { new: true, upsert: true }
+  );
+  return result.seq - count + 1;
+}
+
 const authMiddleware = (req, res, next) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -107,31 +117,29 @@ const authMiddleware = (req, res, next) => {
     return res.status(401).json({ error: 'Invalid token' });
   }
 };
+
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok' });
+});
+
 app.get('/api/admin/questions/:collection/batch/:batchId/full', authMiddleware, async (req, res) => {
   try {
-    await connectDB();
+    const { Counter, PcsQuestion, BookQuestion, ParagraphQuestion } = await getQuestionModels();
+    const collections = { pcsquestions: PcsQuestion, bookquestions: BookQuestion, paragraphquestions: ParagraphQuestion };
+
     const { collection, batchId } = req.params;
     const Model = collections[collection];
-  
     if (!Model) return res.status(400).json({ error: 'Invalid collection' });
-    
+
     const questions = await Model.find({ batchId }).sort({ _id: 1 });
-    
-    if (questions.length === 0) {
-      return res.status(404).json({ error: 'Batch not found or empty' });
-    }
+    if (questions.length === 0) return res.status(404).json({ error: 'Batch not found or empty' });
 
     const cleanBatch = questions.map(q => {
       const { _id, batchId, createdAt, updatedAt, __v, ...cleanQuestion } = q.toObject();
       return cleanQuestion;
     });
 
-    res.json({
-      message: 'Batch JSON retrieved successfully',
-      batchId,
-      count: cleanBatch.length,
-      questions: cleanBatch
-    });
+    res.json({ message: 'Batch JSON retrieved successfully', batchId, count: cleanBatch.length, questions: cleanBatch });
   } catch (error) {
     console.error('Fetch Full Batch Error:', error);
     res.status(500).json({ error: error.message });
@@ -140,10 +148,11 @@ app.get('/api/admin/questions/:collection/batch/:batchId/full', authMiddleware, 
 
 app.post('/api/admin/questions/:collection', authMiddleware, async (req, res) => {
   try {
-    await connectDB();
+    const { Counter, PcsQuestion, BookQuestion, ParagraphQuestion } = await getQuestionModels();
+    const collections = { pcsquestions: PcsQuestion, bookquestions: BookQuestion, paragraphquestions: ParagraphQuestion };
+
     const { collection } = req.params;
     const Model = collections[collection];
-  
     if (!Model) return res.status(400).json({ error: 'Invalid collection' });
 
     const data = req.body;
@@ -151,44 +160,20 @@ app.post('/api/admin/questions/:collection', authMiddleware, async (req, res) =>
 
     if (Array.isArray(data)) {
       if (data.length === 0) return res.json({ message: 'No questions', count: 0 });
-      const startId = await getNextSequence(collection, data.length);
-      
+      const startId = await getNextSequence(Counter, collection, data.length);
       const preparedQuestions = data.map((q, index) => {
         const { _id, question_id, id, ...rest } = q;
-        return {
-          ...rest,
-          _id: startId + index,
-          batchId,
-          subject: rest.subject || 'Uncategorized'
-        };
+        return { ...rest, _id: startId + index, batchId, subject: rest.subject || 'Uncategorized' };
       });
-
       await Model.insertMany(preparedQuestions);
-      
-      return res.json({
-        message: 'Questions uploaded successfully',
-        count: data.length,
-        batchId,
-        idRange: { start: startId, end: startId + data.length - 1 }
-      });
+      return res.json({ message: 'Questions uploaded successfully', count: data.length, batchId, idRange: { start: startId, end: startId + data.length - 1 } });
     }
 
-    const startId = await getNextSequence(collection, 1);
+    const startId = await getNextSequence(Counter, collection, 1);
     const { _id, question_id, id, ...rest } = data;
-    
-    const doc = new Model({
-      ...rest,
-      _id: startId,
-      batchId,
-      subject: rest.subject || 'Uncategorized'
-    });
-
+    const doc = new Model({ ...rest, _id: startId, batchId, subject: rest.subject || 'Uncategorized' });
     await doc.save();
-    
-    res.json({
-      message: 'Question added successfully',
-      generatedId: startId
-    });
+    res.json({ message: 'Question added successfully', generatedId: startId });
   } catch (error) {
     console.error('Upload Error:', error);
     res.status(500).json({ error: error.message });
@@ -197,24 +182,21 @@ app.post('/api/admin/questions/:collection', authMiddleware, async (req, res) =>
 
 app.get('/api/admin/questions/:collection', authMiddleware, async (req, res) => {
   try {
-    await connectDB();
+    const { PcsQuestion, BookQuestion, ParagraphQuestion } = await getQuestionModels();
+    const collections = { pcsquestions: PcsQuestion, bookquestions: BookQuestion, paragraphquestions: ParagraphQuestion };
+
     const { collection } = req.params;
     const Model = collections[collection];
     if (!Model) return res.status(400).json({ error: 'Invalid collection' });
 
     const { limit = 100, skip = 0, year, exam, subject, batchId } = req.query;
-    
     const filter = {};
     if (year) filter.year = parseInt(year);
     if (exam) filter.exam = exam;
     if (subject) filter.subject = subject;
     if (batchId) filter.batchId = batchId;
 
-    const questions = await Model.find(filter)
-      .sort({ _id: 1 })
-      .skip(parseInt(skip))
-      .limit(parseInt(limit));
-
+    const questions = await Model.find(filter).sort({ _id: 1 }).skip(parseInt(skip)).limit(parseInt(limit));
     res.json(questions);
   } catch (error) {
     console.error('Fetch Error:', error);
@@ -224,14 +206,15 @@ app.get('/api/admin/questions/:collection', authMiddleware, async (req, res) => 
 
 app.get('/api/admin/questions/:collection/:id', authMiddleware, async (req, res) => {
   try {
-    await connectDB();
+    const { PcsQuestion, BookQuestion, ParagraphQuestion } = await getQuestionModels();
+    const collections = { pcsquestions: PcsQuestion, bookquestions: BookQuestion, paragraphquestions: ParagraphQuestion };
+
     const { collection, id } = req.params;
     const Model = collections[collection];
     if (!Model) return res.status(400).json({ error: 'Invalid collection' });
 
     const question = await Model.findById(parseInt(id));
     if (!question) return res.status(404).json({ error: 'Question not found' });
-
     res.json(question);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -240,17 +223,14 @@ app.get('/api/admin/questions/:collection/:id', authMiddleware, async (req, res)
 
 app.patch('/api/admin/questions/:collection/:id', authMiddleware, async (req, res) => {
   try {
-    await connectDB();
+    const { PcsQuestion, BookQuestion, ParagraphQuestion } = await getQuestionModels();
+    const collections = { pcsquestions: PcsQuestion, bookquestions: BookQuestion, paragraphquestions: ParagraphQuestion };
+
     const { collection, id } = req.params;
     const Model = collections[collection];
     if (!Model) return res.status(400).json({ error: 'Invalid collection' });
 
-    const updated = await Model.findByIdAndUpdate(
-      parseInt(id),
-      req.body,
-      { new: true, runValidators: true }
-    );
-  
+    const updated = await Model.findByIdAndUpdate(parseInt(id), req.body, { new: true, runValidators: true });
     if (!updated) return res.status(404).json({ error: 'Question not found' });
     res.json(updated);
   } catch (error) {
@@ -260,14 +240,15 @@ app.patch('/api/admin/questions/:collection/:id', authMiddleware, async (req, re
 
 app.delete('/api/admin/questions/:collection/:id', authMiddleware, async (req, res) => {
   try {
-    await connectDB();
+    const { PcsQuestion, BookQuestion, ParagraphQuestion } = await getQuestionModels();
+    const collections = { pcsquestions: PcsQuestion, bookquestions: BookQuestion, paragraphquestions: ParagraphQuestion };
+
     const { collection, id } = req.params;
     const Model = collections[collection];
     if (!Model) return res.status(400).json({ error: 'Invalid collection' });
 
     const deleted = await Model.findByIdAndDelete(parseInt(id));
     if (!deleted) return res.status(404).json({ error: 'Question not found' });
-    
     res.json({ message: 'Question deleted successfully' });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -276,7 +257,9 @@ app.delete('/api/admin/questions/:collection/:id', authMiddleware, async (req, r
 
 app.delete('/api/admin/questions/:collection/batch/:batchId', authMiddleware, async (req, res) => {
   try {
-    await connectDB();
+    const { PcsQuestion, BookQuestion, ParagraphQuestion } = await getQuestionModels();
+    const collections = { pcsquestions: PcsQuestion, bookquestions: BookQuestion, paragraphquestions: ParagraphQuestion };
+
     const { collection, batchId } = req.params;
     const Model = collections[collection];
     if (!Model) return res.status(400).json({ error: 'Invalid collection' });
@@ -286,6 +269,103 @@ app.delete('/api/admin/questions/:collection/batch/:batchId', authMiddleware, as
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
+});
+
+app.post('/api/admin/current-affairs', authMiddleware, async (req, res) => {
+  try {
+    const CurrentAffair = await getCAModel();
+    const data = req.body;
+
+    if (Array.isArray(data)) {
+      if (data.length === 0) return res.json({ message: 'No items', count: 0 });
+      const docs = await CurrentAffair.insertMany(data);
+      return res.status(201).json({ message: 'Current affairs uploaded successfully', count: docs.length });
+    }
+
+    const doc = new CurrentAffair(data);
+    await doc.save();
+    res.status(201).json({ message: 'Current affair added successfully', data: doc });
+  } catch (error) {
+    console.error('Current Affairs Upload Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/admin/current-affairs', authMiddleware, async (req, res) => {
+  try {
+    const CurrentAffair = await getCAModel();
+    const { limit = 50, skip = 0, subject, date, search } = req.query;
+
+    const filter = {};
+    if (subject) filter.subject = subject;
+    if (date) filter.date = date;
+    if (search) filter.title = { $regex: search, $options: 'i' };
+
+    const [items, total] = await Promise.all([
+      CurrentAffair.find(filter).sort({ createdAt: -1 }).skip(parseInt(skip)).limit(parseInt(limit)),
+      CurrentAffair.countDocuments(filter)
+    ]);
+
+    res.json({ total, count: items.length, data: items });
+  } catch (error) {
+    console.error('Current Affairs Fetch Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/admin/current-affairs/:id', authMiddleware, async (req, res) => {
+  try {
+    const CurrentAffair = await getCAModel();
+    const item = await CurrentAffair.findById(req.params.id);
+    if (!item) return res.status(404).json({ error: 'Current affair not found' });
+    res.json(item);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.patch('/api/admin/current-affairs/:id', authMiddleware, async (req, res) => {
+  try {
+    const CurrentAffair = await getCAModel();
+    const updated = await CurrentAffair.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true });
+    if (!updated) return res.status(404).json({ error: 'Current affair not found' });
+    res.json({ message: 'Updated successfully', data: updated });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/admin/current-affairs/:id', authMiddleware, async (req, res) => {
+  try {
+    const CurrentAffair = await getCAModel();
+    const deleted = await CurrentAffair.findByIdAndDelete(req.params.id);
+    if (!deleted) return res.status(404).json({ error: 'Current affair not found' });
+    res.json({ message: 'Current affair deleted successfully' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/admin/current-affairs', authMiddleware, async (req, res) => {
+  try {
+    const CurrentAffair = await getCAModel();
+    const { date, subject } = req.query;
+    if (!date && !subject) return res.status(400).json({ error: 'Provide at least date or subject to bulk delete' });
+
+    const filter = {};
+    if (date) filter.date = date;
+    if (subject) filter.subject = subject;
+
+    const result = await CurrentAffair.deleteMany(filter);
+    res.json({ message: 'Bulk delete successful', deletedCount: result.deletedCount });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });
 
 module.exports = app;
