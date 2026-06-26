@@ -17,9 +17,11 @@ app.use(express.json());
 const JWT_SECRET = process.env.JWT_SECRET || 'secret_key';
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/questiondb';
 const CAMONGODB_URI = process.env.CAMONGODB_URI || 'mongodb://localhost:27017/currentaffairsdb';
+const ITMONGODB_URI = process.env.ITMONGODB_URI || 'mongodb://localhost:27017/importanttopicsdb';
 
 let cachedQuestionConn = null;
 let cachedCAConn = null;
+let cachedITConn = null;
 
 async function connectQuestionDB() {
   if (cachedQuestionConn) return cachedQuestionConn;
@@ -42,6 +44,18 @@ async function connectCADB() {
   }).asPromise();
   cachedCAConn = conn;
   console.log('Current Affairs MongoDB Connected');
+  return conn;
+}
+
+async function connectITDB() {
+  if (cachedITConn) return cachedITConn;
+  const conn = await mongoose.createConnection(ITMONGODB_URI, {
+    serverSelectionTimeoutMS: 5000,
+    socketTimeoutMS: 45000,
+    maxPoolSize: 10,
+  }).asPromise();
+  cachedITConn = conn;
+  console.log('Important Topics MongoDB Connected');
   return conn;
 }
 
@@ -82,6 +96,12 @@ const CurrentAffairSchema = new mongoose.Schema({
   highlights: { type: [String], default: [] }
 }, { timestamps: true });
 
+const ImportantTopicSchema = new mongoose.Schema({
+  title: { type: String, required: true },
+  subject: { type: String, required: true },
+  points: [{ type: String, required: true }]
+}, { timestamps: true });
+
 async function getQuestionModels() {
   const conn = await connectQuestionDB();
   const Counter = conn.models.Counter || conn.model('Counter', CounterSchema, 'counters');
@@ -94,6 +114,11 @@ async function getQuestionModels() {
 async function getCAModel() {
   const conn = await connectCADB();
   return conn.models.CurrentAffair || conn.model('CurrentAffair', CurrentAffairSchema, 'ca_articles');
+}
+
+async function getITModel() {
+  const conn = await connectITDB();
+  return conn.models.ImportantTopic || conn.model('ImportantTopic', ImportantTopicSchema, 'important_topics');
 }
 
 async function getNextSequence(Counter, collectionName, count = 1) {
@@ -357,6 +382,93 @@ app.delete('/api/admin/current-affairs', authMiddleware, async (req, res) => {
     if (subject) filter.subject = subject;
 
     const result = await CurrentAffair.deleteMany(filter);
+    res.json({ message: 'Bulk delete successful', deletedCount: result.deletedCount });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/admin/important-topics', authMiddleware, async (req, res) => {
+  try {
+    const ImportantTopic = await getITModel();
+    const data = req.body;
+
+    if (Array.isArray(data)) {
+      if (data.length === 0) return res.json({ message: 'No items', count: 0 });
+      const docs = await ImportantTopic.insertMany(data);
+      return res.status(201).json({ message: 'Important topics uploaded successfully', count: docs.length });
+    }
+
+    const doc = new ImportantTopic(data);
+    await doc.save();
+    res.status(201).json({ message: 'Important topic added successfully', data: doc });
+  } catch (error) {
+    console.error('Important Topics Upload Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/admin/important-topics', authMiddleware, async (req, res) => {
+  try {
+    const ImportantTopic = await getITModel();
+    const { limit = 50, skip = 0, subject, search } = req.query;
+
+    const filter = {};
+    if (subject) filter.subject = subject;
+    if (search) filter.title = { $regex: search, $options: 'i' };
+
+    const [items, total] = await Promise.all([
+      ImportantTopic.find(filter).sort({ createdAt: -1 }).skip(parseInt(skip)).limit(parseInt(limit)),
+      ImportantTopic.countDocuments(filter)
+    ]);
+
+    res.json({ total, count: items.length, data: items });
+  } catch (error) {
+    console.error('Important Topics Fetch Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/admin/important-topics/:id', authMiddleware, async (req, res) => {
+  try {
+    const ImportantTopic = await getITModel();
+    const item = await ImportantTopic.findById(req.params.id);
+    if (!item) return res.status(404).json({ error: 'Important topic not found' });
+    res.json(item);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.patch('/api/admin/important-topics/:id', authMiddleware, async (req, res) => {
+  try {
+    const ImportantTopic = await getITModel();
+    const updated = await ImportantTopic.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true });
+    if (!updated) return res.status(404).json({ error: 'Important topic not found' });
+    res.json({ message: 'Updated successfully', data: updated });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/admin/important-topics/:id', authMiddleware, async (req, res) => {
+  try {
+    const ImportantTopic = await getITModel();
+    const deleted = await ImportantTopic.findByIdAndDelete(req.params.id);
+    if (!deleted) return res.status(404).json({ error: 'Important topic not found' });
+    res.json({ message: 'Important topic deleted successfully' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/admin/important-topics', authMiddleware, async (req, res) => {
+  try {
+    const ImportantTopic = await getITModel();
+    const { subject } = req.query;
+    if (!subject) return res.status(400).json({ error: 'Provide subject to bulk delete' });
+
+    const result = await ImportantTopic.deleteMany({ subject });
     res.json({ message: 'Bulk delete successful', deletedCount: result.deletedCount });
   } catch (error) {
     res.status(500).json({ error: error.message });
