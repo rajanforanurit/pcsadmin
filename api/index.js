@@ -18,10 +18,12 @@ const JWT_SECRET = process.env.JWT_SECRET || 'secret_key';
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/questiondb';
 const CAMONGODB_URI = process.env.CAMONGODB_URI || 'mongodb://localhost:27017/currentaffairsdb';
 const ITMONGODB_URI = process.env.ITMONGODB_URI || 'mongodb://localhost:27017/importanttopicsdb';
+const DYKMONGODB_URI = process.env.DYKMONGODB_URI || 'mongodb://localhost:27017/didyouknowdb';
 
 let cachedQuestionConn = null;
 let cachedCAConn = null;
 let cachedITConn = null;
+let cachedDYKConn = null;
 
 async function connectQuestionDB() {
   if (cachedQuestionConn) return cachedQuestionConn;
@@ -56,6 +58,18 @@ async function connectITDB() {
   }).asPromise();
   cachedITConn = conn;
   console.log('Important Topics MongoDB Connected');
+  return conn;
+}
+
+async function connectDYKDB() {
+  if (cachedDYKConn) return cachedDYKConn;
+  const conn = await mongoose.createConnection(DYKMONGODB_URI, {
+    serverSelectionTimeoutMS: 5000,
+    socketTimeoutMS: 45000,
+    maxPoolSize: 10,
+  }).asPromise();
+  cachedDYKConn = conn;
+  console.log('Did You Know MongoDB Connected');
   return conn;
 }
 
@@ -102,6 +116,13 @@ const ImportantTopicSchema = new mongoose.Schema({
   points: [{ type: String, required: true }]
 }, { timestamps: true });
 
+const DidYouKnowSchema = new mongoose.Schema({
+  question: { type: String, required: true },
+  answer: { type: String, required: true },
+  explanation: { type: String, required: true },
+  subject: { type: String, required: true }
+}, { timestamps: true });
+
 async function getQuestionModels() {
   const conn = await connectQuestionDB();
   const Counter = conn.models.Counter || conn.model('Counter', CounterSchema, 'counters');
@@ -119,6 +140,11 @@ async function getCAModel() {
 async function getITModel() {
   const conn = await connectITDB();
   return conn.models.ImportantTopic || conn.model('ImportantTopic', ImportantTopicSchema, 'important_topics');
+}
+
+async function getDYKModel() {
+  const conn = await connectDYKDB();
+  return conn.models.DidYouKnow || conn.model('DidYouKnow', DidYouKnowSchema, 'did_you_know');
 }
 
 async function getNextSequence(Counter, collectionName, count = 1) {
@@ -488,6 +514,93 @@ app.delete('/api/admin/important-topics', authMiddleware, async (req, res) => {
     if (!subject) return res.status(400).json({ error: 'Provide subject to bulk delete' });
 
     const result = await ImportantTopic.deleteMany({ subject });
+    res.json({ message: 'Bulk delete successful', deletedCount: result.deletedCount });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/admin/did-you-know', authMiddleware, async (req, res) => {
+  try {
+    const DidYouKnow = await getDYKModel();
+    const data = req.body;
+
+    if (Array.isArray(data)) {
+      if (data.length === 0) return res.json({ message: 'No items', count: 0 });
+      const docs = await DidYouKnow.insertMany(data);
+      return res.status(201).json({ message: 'Did You Know items uploaded successfully', count: docs.length });
+    }
+
+    const doc = new DidYouKnow(data);
+    await doc.save();
+    res.status(201).json({ message: 'Did You Know item added successfully', data: doc });
+  } catch (error) {
+    console.error('Did You Know Upload Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/admin/did-you-know', authMiddleware, async (req, res) => {
+  try {
+    const DidYouKnow = await getDYKModel();
+    const { limit = 50, skip = 0, subject, search } = req.query;
+
+    const filter = {};
+    if (subject) filter.subject = subject;
+    if (search) filter.question = { $regex: search, $options: 'i' };
+
+    const [items, total] = await Promise.all([
+      DidYouKnow.find(filter).sort({ createdAt: -1 }).skip(parseInt(skip)).limit(parseInt(limit)),
+      DidYouKnow.countDocuments(filter)
+    ]);
+
+    res.json({ total, count: items.length, data: items });
+  } catch (error) {
+    console.error('Did You Know Fetch Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/admin/did-you-know/:id', authMiddleware, async (req, res) => {
+  try {
+    const DidYouKnow = await getDYKModel();
+    const item = await DidYouKnow.findById(req.params.id);
+    if (!item) return res.status(404).json({ error: 'Did You Know item not found' });
+    res.json(item);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.patch('/api/admin/did-you-know/:id', authMiddleware, async (req, res) => {
+  try {
+    const DidYouKnow = await getDYKModel();
+    const updated = await DidYouKnow.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true });
+    if (!updated) return res.status(404).json({ error: 'Did You Know item not found' });
+    res.json({ message: 'Updated successfully', data: updated });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/admin/did-you-know/:id', authMiddleware, async (req, res) => {
+  try {
+    const DidYouKnow = await getDYKModel();
+    const deleted = await DidYouKnow.findByIdAndDelete(req.params.id);
+    if (!deleted) return res.status(404).json({ error: 'Did You Know item not found' });
+    res.json({ message: 'Did You Know item deleted successfully' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/admin/did-you-know', authMiddleware, async (req, res) => {
+  try {
+    const DidYouKnow = await getDYKModel();
+    const { subject } = req.query;
+    if (!subject) return res.status(400).json({ error: 'Provide subject to bulk delete' });
+
+    const result = await DidYouKnow.deleteMany({ subject });
     res.json({ message: 'Bulk delete successful', deletedCount: result.deletedCount });
   } catch (error) {
     res.status(500).json({ error: error.message });
