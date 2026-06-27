@@ -139,7 +139,7 @@ const DidYouKnowSchema = new mongoose.Schema({
 
 const TodayInPastSchema = new mongoose.Schema({
   date: { type: String, required: true },
-  year: { type: String, required: true },
+  year: { type: String},
   event: { type: String, required: true, trim: true },
   subject: { type: String, required: true, trim: true }
 }, { timestamps: true });
