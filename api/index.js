@@ -19,11 +19,13 @@ const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/questi
 const CAMONGODB_URI = process.env.CAMONGODB_URI || 'mongodb://localhost:27017/currentaffairsdb';
 const ITMONGODB_URI = process.env.ITMONGODB_URI || 'mongodb://localhost:27017/importanttopicsdb';
 const DYKMONGODB_URI = process.env.DYKMONGODB_URI || 'mongodb://localhost:27017/didyouknowdb';
+const TIPMONGODB_URI = process.env.TIPMONGODB_URI || 'mongodb://localhost:27017/todayinpastdb';
 
 let cachedQuestionConn = null;
 let cachedCAConn = null;
 let cachedITConn = null;
 let cachedDYKConn = null;
+let cachedTIPConn = null;
 
 async function connectQuestionDB() {
   if (cachedQuestionConn) return cachedQuestionConn;
@@ -70,6 +72,18 @@ async function connectDYKDB() {
   }).asPromise();
   cachedDYKConn = conn;
   console.log('Did You Know MongoDB Connected');
+  return conn;
+}
+
+async function connectTIPDB() {
+  if (cachedTIPConn) return cachedTIPConn;
+  const conn = await mongoose.createConnection(TIPMONGODB_URI, {
+    serverSelectionTimeoutMS: 5000,
+    socketTimeoutMS: 45000,
+    maxPoolSize: 10,
+  }).asPromise();
+  cachedTIPConn = conn;
+  console.log('Today In Past MongoDB Connected');
   return conn;
 }
 
@@ -123,6 +137,13 @@ const DidYouKnowSchema = new mongoose.Schema({
   subject: { type: String, required: true }
 }, { timestamps: true });
 
+const TodayInPastSchema = new mongoose.Schema({
+  date: { type: String, required: true },
+  year: { type: String, required: true },
+  event: { type: String, required: true, trim: true },
+  subject: { type: String, required: true, trim: true }
+}, { timestamps: true });
+
 async function getQuestionModels() {
   const conn = await connectQuestionDB();
   const Counter = conn.models.Counter || conn.model('Counter', CounterSchema, 'counters');
@@ -145,6 +166,11 @@ async function getITModel() {
 async function getDYKModel() {
   const conn = await connectDYKDB();
   return conn.models.DidYouKnow || conn.model('DidYouKnow', DidYouKnowSchema, 'did_you_know');
+}
+
+async function getTIPModel() {
+  const conn = await connectTIPDB();
+  return conn.models.TodayInPast || conn.model('TodayInPast', TodayInPastSchema, 'today_in_past');
 }
 
 async function getNextSequence(Counter, collectionName, count = 1) {
@@ -601,6 +627,98 @@ app.delete('/api/admin/did-you-know', authMiddleware, async (req, res) => {
     if (!subject) return res.status(400).json({ error: 'Provide subject to bulk delete' });
 
     const result = await DidYouKnow.deleteMany({ subject });
+    res.json({ message: 'Bulk delete successful', deletedCount: result.deletedCount });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/admin/today-in-past', authMiddleware, async (req, res) => {
+  try {
+    const TodayInPast = await getTIPModel();
+    const data = req.body;
+
+    if (Array.isArray(data)) {
+      if (data.length === 0) return res.json({ message: 'No items', count: 0 });
+      const docs = await TodayInPast.insertMany(data);
+      return res.status(201).json({ message: 'Today In Past items uploaded successfully', count: docs.length });
+    }
+
+    const doc = new TodayInPast(data);
+    await doc.save();
+    res.status(201).json({ message: 'Today In Past item added successfully', data: doc });
+  } catch (error) {
+    console.error('Today In Past Upload Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/admin/today-in-past', authMiddleware, async (req, res) => {
+  try {
+    const TodayInPast = await getTIPModel();
+    const { limit = 50, skip = 0, subject, date, search } = req.query;
+
+    const filter = {};
+    if (subject) filter.subject = subject;
+    if (date) filter.date = date;
+    if (search) filter.event = { $regex: search, $options: 'i' };
+
+    const [items, total] = await Promise.all([
+      TodayInPast.find(filter).sort({ createdAt: -1 }).skip(parseInt(skip)).limit(parseInt(limit)),
+      TodayInPast.countDocuments(filter)
+    ]);
+
+    res.json({ total, count: items.length, data: items });
+  } catch (error) {
+    console.error('Today In Past Fetch Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/admin/today-in-past/:id', authMiddleware, async (req, res) => {
+  try {
+    const TodayInPast = await getTIPModel();
+    const item = await TodayInPast.findById(req.params.id);
+    if (!item) return res.status(404).json({ error: 'Today In Past item not found' });
+    res.json(item);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.patch('/api/admin/today-in-past/:id', authMiddleware, async (req, res) => {
+  try {
+    const TodayInPast = await getTIPModel();
+    const updated = await TodayInPast.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true });
+    if (!updated) return res.status(404).json({ error: 'Today In Past item not found' });
+    res.json({ message: 'Updated successfully', data: updated });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/admin/today-in-past/:id', authMiddleware, async (req, res) => {
+  try {
+    const TodayInPast = await getTIPModel();
+    const deleted = await TodayInPast.findByIdAndDelete(req.params.id);
+    if (!deleted) return res.status(404).json({ error: 'Today In Past item not found' });
+    res.json({ message: 'Today In Past item deleted successfully' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/admin/today-in-past', authMiddleware, async (req, res) => {
+  try {
+    const TodayInPast = await getTIPModel();
+    const { date, subject } = req.query;
+    if (!date && !subject) return res.status(400).json({ error: 'Provide at least date or subject to bulk delete' });
+
+    const filter = {};
+    if (date) filter.date = date;
+    if (subject) filter.subject = subject;
+
+    const result = await TodayInPast.deleteMany(filter);
     res.json({ message: 'Bulk delete successful', deletedCount: result.deletedCount });
   } catch (error) {
     res.status(500).json({ error: error.message });
