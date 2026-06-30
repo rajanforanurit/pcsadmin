@@ -100,18 +100,19 @@ const QuestionSchema = new mongoose.Schema({
   subject: { type: String, required: true, trim: true },
   topic: { type: String, trim: true },
   imageUrl: { type: String, trim: true, default: null },
-  english: {
+ english: {
     question: { type: String, required: true },
-    options: { type: Object, required: true }
+    options: { type: Object, required: true },
+    english_explanation: { type: String, trim: true, default: '' }
   },
   hindi: {
     question: { type: String, required: true },
-    options: { type: Object, required: true }
+    options: { type: Object, required: true },
+    hindi_explanation: { type: String, trim: true, default: '' }
   },
   marks: { type: Number, default: 2 },
   negativeMarks: { type: Number, default: 0.66 },
   correct_answer: { type: Number, required: true },
-  explanation: { type: String },
   batchId: { type: String }
 }, { timestamps: true });
 
