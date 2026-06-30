@@ -293,14 +293,17 @@ app.get('/api/admin/questions/:collection', authMiddleware, async (req, res) => 
     if (subject) filter.subject = subject;
     if (batchId) filter.batchId = batchId;
 
-    const questions = await Model.find(filter).sort({ _id: 1 }).skip(parseInt(skip)).limit(parseInt(limit));
-    res.json(questions);
+    const [questions, total] = await Promise.all([
+      Model.find(filter).sort({ _id: 1 }).skip(parseInt(skip)).limit(parseInt(limit)),
+      Model.countDocuments(filter)
+    ]);
+
+    res.json({ total, count: questions.length, data: questions });
   } catch (error) {
     console.error('Fetch Error:', error);
     res.status(500).json({ error: error.message });
   }
 });
-
 app.get('/api/admin/questions/:collection/:id', authMiddleware, async (req, res) => {
   try {
     const { PcsQuestion, BookQuestion, ParagraphQuestion } = await getQuestionModels();
