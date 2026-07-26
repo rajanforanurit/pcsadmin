@@ -12,7 +12,7 @@ app.use(cors({
   credentials: true
 }));
 
-app.use(express.json());
+app.use(express.json({ limit: '5mb' }));
 
 const JWT_SECRET = process.env.JWT_SECRET || 'secret_key';
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/questiondb';
@@ -100,7 +100,7 @@ const QuestionSchema = new mongoose.Schema({
   subject: { type: String, required: true, trim: true },
   topic: { type: String, trim: true },
   imageUrl: { type: String, trim: true, default: null },
- english: {
+  english: {
     question: { type: String, required: true },
     options: { type: Object, required: true },
     english_explanation: { type: String, trim: true, default: '' }
@@ -140,18 +140,16 @@ const DidYouKnowSchema = new mongoose.Schema({
 
 const TodayInPastSchema = new mongoose.Schema({
   date: { type: String, required: true },
-  year: { type: String},
+  year: { type: String },
   event: { type: String, required: true, trim: true },
   subject: { type: String, required: true, trim: true }
 }, { timestamps: true });
 
-async function getQuestionModels() {
+async function getQuestionModel() {
   const conn = await connectQuestionDB();
   const Counter = conn.models.Counter || conn.model('Counter', CounterSchema, 'counters');
   const PcsQuestion = conn.models.PcsQuestion || conn.model('PcsQuestion', QuestionSchema, 'pcsquestions');
-  const BookQuestion = conn.models.BookQuestion || conn.model('BookQuestion', QuestionSchema, 'bookquestions');
-  const ParagraphQuestion = conn.models.ParagraphQuestion || conn.model('ParagraphQuestion', QuestionSchema, 'paragraphquestions');
-  return { Counter, PcsQuestion, BookQuestion, ParagraphQuestion };
+  return { Counter, PcsQuestion };
 }
 
 async function getCAModel() {
@@ -174,9 +172,9 @@ async function getTIPModel() {
   return conn.models.TodayInPast || conn.model('TodayInPast', TodayInPastSchema, 'today_in_past');
 }
 
-async function getNextSequence(Counter, collectionName, count = 1) {
+async function getNextSequence(Counter, count = 1) {
   const result = await Counter.findOneAndUpdate(
-    { _id: `questions_${collectionName}` },
+    { _id: 'questions_pcsquestions' },
     { $inc: { seq: count } },
     { new: true, upsert: true }
   );
@@ -219,16 +217,12 @@ app.post('/api/login', (req, res) => {
   res.json({ message: 'Login successful', token });
 });
 
-app.get('/api/admin/questions/:collection/batch/:batchId/full', authMiddleware, async (req, res) => {
+app.get('/api/admin/questions/batch/:batchId/full', authMiddleware, async (req, res) => {
   try {
-    const { Counter, PcsQuestion, BookQuestion, ParagraphQuestion } = await getQuestionModels();
-    const collections = { pcsquestions: PcsQuestion, bookquestions: BookQuestion, paragraphquestions: ParagraphQuestion };
+    const { PcsQuestion } = await getQuestionModel();
+    const { batchId } = req.params;
 
-    const { collection, batchId } = req.params;
-    const Model = collections[collection];
-    if (!Model) return res.status(400).json({ error: 'Invalid collection' });
-
-    const questions = await Model.find({ batchId }).sort({ _id: 1 });
+    const questions = await PcsQuestion.find({ batchId }).sort({ _id: 1 });
     if (questions.length === 0) return res.status(404).json({ error: 'Batch not found or empty' });
 
     const cleanBatch = questions.map(q => {
@@ -243,32 +237,26 @@ app.get('/api/admin/questions/:collection/batch/:batchId/full', authMiddleware, 
   }
 });
 
-app.post('/api/admin/questions/:collection', authMiddleware, async (req, res) => {
+app.post('/api/admin/questions', authMiddleware, async (req, res) => {
   try {
-    const { Counter, PcsQuestion, BookQuestion, ParagraphQuestion } = await getQuestionModels();
-    const collections = { pcsquestions: PcsQuestion, bookquestions: BookQuestion, paragraphquestions: ParagraphQuestion };
-
-    const { collection } = req.params;
-    const Model = collections[collection];
-    if (!Model) return res.status(400).json({ error: 'Invalid collection' });
-
+    const { Counter, PcsQuestion } = await getQuestionModel();
     const data = req.body;
     const batchId = `batch_${Date.now()}`;
 
     if (Array.isArray(data)) {
       if (data.length === 0) return res.json({ message: 'No questions', count: 0 });
-      const startId = await getNextSequence(Counter, collection, data.length);
+      const startId = await getNextSequence(Counter, data.length);
       const preparedQuestions = data.map((q, index) => {
         const { _id, question_id, id, ...rest } = q;
         return { ...rest, _id: startId + index, batchId, subject: rest.subject || 'Uncategorized' };
       });
-      await Model.insertMany(preparedQuestions);
+      await PcsQuestion.insertMany(preparedQuestions);
       return res.json({ message: 'Questions uploaded successfully', count: data.length, batchId, idRange: { start: startId, end: startId + data.length - 1 } });
     }
 
-    const startId = await getNextSequence(Counter, collection, 1);
+    const startId = await getNextSequence(Counter, 1);
     const { _id, question_id, id, ...rest } = data;
-    const doc = new Model({ ...rest, _id: startId, batchId, subject: rest.subject || 'Uncategorized' });
+    const doc = new PcsQuestion({ ...rest, _id: startId, batchId, subject: rest.subject || 'Uncategorized' });
     await doc.save();
     res.json({ message: 'Question added successfully', generatedId: startId });
   } catch (error) {
@@ -277,14 +265,9 @@ app.post('/api/admin/questions/:collection', authMiddleware, async (req, res) =>
   }
 });
 
-app.get('/api/admin/questions/:collection', authMiddleware, async (req, res) => {
+app.get('/api/admin/questions', authMiddleware, async (req, res) => {
   try {
-    const { PcsQuestion, BookQuestion, ParagraphQuestion } = await getQuestionModels();
-    const collections = { pcsquestions: PcsQuestion, bookquestions: BookQuestion, paragraphquestions: ParagraphQuestion };
-
-    const { collection } = req.params;
-    const Model = collections[collection];
-    if (!Model) return res.status(400).json({ error: 'Invalid collection' });
+    const { PcsQuestion } = await getQuestionModel();
 
     const { limit = 100, skip = 0, year, exam, subject, batchId } = req.query;
     const filter = {};
@@ -294,8 +277,8 @@ app.get('/api/admin/questions/:collection', authMiddleware, async (req, res) => 
     if (batchId) filter.batchId = batchId;
 
     const [questions, total] = await Promise.all([
-      Model.find(filter).sort({ _id: 1 }).skip(parseInt(skip)).limit(parseInt(limit)),
-      Model.countDocuments(filter)
+      PcsQuestion.find(filter).sort({ _id: 1 }).skip(parseInt(skip)).limit(parseInt(limit)),
+      PcsQuestion.countDocuments(filter)
     ]);
 
     res.json({ total, count: questions.length, data: questions });
@@ -304,16 +287,13 @@ app.get('/api/admin/questions/:collection', authMiddleware, async (req, res) => 
     res.status(500).json({ error: error.message });
   }
 });
-app.get('/api/admin/questions/:collection/:id', authMiddleware, async (req, res) => {
+
+app.get('/api/admin/questions/:id', authMiddleware, async (req, res) => {
   try {
-    const { PcsQuestion, BookQuestion, ParagraphQuestion } = await getQuestionModels();
-    const collections = { pcsquestions: PcsQuestion, bookquestions: BookQuestion, paragraphquestions: ParagraphQuestion };
+    const { PcsQuestion } = await getQuestionModel();
+    const { id } = req.params;
 
-    const { collection, id } = req.params;
-    const Model = collections[collection];
-    if (!Model) return res.status(400).json({ error: 'Invalid collection' });
-
-    const question = await Model.findById(parseInt(id));
+    const question = await PcsQuestion.findById(parseInt(id));
     if (!question) return res.status(404).json({ error: 'Question not found' });
     res.json(question);
   } catch (error) {
@@ -321,16 +301,12 @@ app.get('/api/admin/questions/:collection/:id', authMiddleware, async (req, res)
   }
 });
 
-app.patch('/api/admin/questions/:collection/:id', authMiddleware, async (req, res) => {
+app.patch('/api/admin/questions/:id', authMiddleware, async (req, res) => {
   try {
-    const { PcsQuestion, BookQuestion, ParagraphQuestion } = await getQuestionModels();
-    const collections = { pcsquestions: PcsQuestion, bookquestions: BookQuestion, paragraphquestions: ParagraphQuestion };
+    const { PcsQuestion } = await getQuestionModel();
+    const { id } = req.params;
 
-    const { collection, id } = req.params;
-    const Model = collections[collection];
-    if (!Model) return res.status(400).json({ error: 'Invalid collection' });
-
-    const updated = await Model.findByIdAndUpdate(parseInt(id), req.body, { new: true, runValidators: true });
+    const updated = await PcsQuestion.findByIdAndUpdate(parseInt(id), req.body, { new: true, runValidators: true });
     if (!updated) return res.status(404).json({ error: 'Question not found' });
     res.json(updated);
   } catch (error) {
@@ -338,16 +314,12 @@ app.patch('/api/admin/questions/:collection/:id', authMiddleware, async (req, re
   }
 });
 
-app.delete('/api/admin/questions/:collection/:id', authMiddleware, async (req, res) => {
+app.delete('/api/admin/questions/:id', authMiddleware, async (req, res) => {
   try {
-    const { PcsQuestion, BookQuestion, ParagraphQuestion } = await getQuestionModels();
-    const collections = { pcsquestions: PcsQuestion, bookquestions: BookQuestion, paragraphquestions: ParagraphQuestion };
+    const { PcsQuestion } = await getQuestionModel();
+    const { id } = req.params;
 
-    const { collection, id } = req.params;
-    const Model = collections[collection];
-    if (!Model) return res.status(400).json({ error: 'Invalid collection' });
-
-    const deleted = await Model.findByIdAndDelete(parseInt(id));
+    const deleted = await PcsQuestion.findByIdAndDelete(parseInt(id));
     if (!deleted) return res.status(404).json({ error: 'Question not found' });
     res.json({ message: 'Question deleted successfully' });
   } catch (error) {
@@ -355,16 +327,12 @@ app.delete('/api/admin/questions/:collection/:id', authMiddleware, async (req, r
   }
 });
 
-app.delete('/api/admin/questions/:collection/batch/:batchId', authMiddleware, async (req, res) => {
+app.delete('/api/admin/questions/batch/:batchId', authMiddleware, async (req, res) => {
   try {
-    const { PcsQuestion, BookQuestion, ParagraphQuestion } = await getQuestionModels();
-    const collections = { pcsquestions: PcsQuestion, bookquestions: BookQuestion, paragraphquestions: ParagraphQuestion };
+    const { PcsQuestion } = await getQuestionModel();
+    const { batchId } = req.params;
 
-    const { collection, batchId } = req.params;
-    const Model = collections[collection];
-    if (!Model) return res.status(400).json({ error: 'Invalid collection' });
-
-    const result = await Model.deleteMany({ batchId });
+    const result = await PcsQuestion.deleteMany({ batchId });
     res.json({ message: 'Batch deleted successfully', deletedCount: result.deletedCount });
   } catch (error) {
     res.status(500).json({ error: error.message });
