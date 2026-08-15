@@ -2,6 +2,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const cors = require('cors');
+const multer = require('multer');
 
 const app = express();
 
@@ -14,25 +15,32 @@ app.use(cors({
 
 app.use(express.json({ limit: '5mb' }));
 
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 }
+});
+
 const JWT_SECRET = process.env.JWT_SECRET || 'secret_key';
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/questiondb';
 const CAMONGODB_URI = process.env.CAMONGODB_URI || 'mongodb://localhost:27017/currentaffairsdb';
 const ITMONGODB_URI = process.env.ITMONGODB_URI || 'mongodb://localhost:27017/importanttopicsdb';
 const DYKMONGODB_URI = process.env.DYKMONGODB_URI || 'mongodb://localhost:27017/didyouknowdb';
 const TIPMONGODB_URI = process.env.TIPMONGODB_URI || 'mongodb://localhost:27017/todayinpastdb';
+const DATAHIS_URI = process.env.DATAHIS_URI || 'mongodb://localhost:27017/uploadhistorydb';
 
 let cachedQuestionConn = null;
 let cachedCAConn = null;
 let cachedITConn = null;
 let cachedDYKConn = null;
 let cachedTIPConn = null;
+let cachedDataHisConn = null;
 
 async function connectQuestionDB() {
   if (cachedQuestionConn) return cachedQuestionConn;
   const conn = await mongoose.createConnection(MONGODB_URI, {
     serverSelectionTimeoutMS: 5000,
     socketTimeoutMS: 45000,
-    maxPoolSize: 10,
+    maxPoolSize: 20,
   }).asPromise();
   cachedQuestionConn = conn;
   console.log('Question MongoDB Connected');
@@ -44,7 +52,7 @@ async function connectCADB() {
   const conn = await mongoose.createConnection(CAMONGODB_URI, {
     serverSelectionTimeoutMS: 5000,
     socketTimeoutMS: 45000,
-    maxPoolSize: 10,
+    maxPoolSize: 20,
   }).asPromise();
   cachedCAConn = conn;
   console.log('Current Affairs MongoDB Connected');
@@ -56,7 +64,7 @@ async function connectITDB() {
   const conn = await mongoose.createConnection(ITMONGODB_URI, {
     serverSelectionTimeoutMS: 5000,
     socketTimeoutMS: 45000,
-    maxPoolSize: 10,
+    maxPoolSize: 20,
   }).asPromise();
   cachedITConn = conn;
   console.log('Important Topics MongoDB Connected');
@@ -68,7 +76,7 @@ async function connectDYKDB() {
   const conn = await mongoose.createConnection(DYKMONGODB_URI, {
     serverSelectionTimeoutMS: 5000,
     socketTimeoutMS: 45000,
-    maxPoolSize: 10,
+    maxPoolSize: 20,
   }).asPromise();
   cachedDYKConn = conn;
   console.log('Did You Know MongoDB Connected');
@@ -80,10 +88,22 @@ async function connectTIPDB() {
   const conn = await mongoose.createConnection(TIPMONGODB_URI, {
     serverSelectionTimeoutMS: 5000,
     socketTimeoutMS: 45000,
-    maxPoolSize: 10,
+    maxPoolSize: 20,
   }).asPromise();
   cachedTIPConn = conn;
   console.log('Today In Past MongoDB Connected');
+  return conn;
+}
+
+async function connectDataHisDB() {
+  if (cachedDataHisConn) return cachedDataHisConn;
+  const conn = await mongoose.createConnection(DATAHIS_URI, {
+    serverSelectionTimeoutMS: 5000,
+    socketTimeoutMS: 45000,
+    maxPoolSize: 10,
+  }).asPromise();
+  cachedDataHisConn = conn;
+  console.log('Data History MongoDB Connected');
   return conn;
 }
 
@@ -145,6 +165,17 @@ const TodayInPastSchema = new mongoose.Schema({
   subject: { type: String, required: true, trim: true }
 }, { timestamps: true });
 
+const UploadHistorySchema = new mongoose.Schema({
+  fileName: { type: String, default: null },
+  uploadType: { type: String, required: true },
+  source: { type: String, enum: ['paste', 'file'], required: true },
+  count: { type: Number, default: 0 },
+  batchId: { type: String, default: null },
+  status: { type: String, enum: ['success', 'failed'], default: 'success' },
+  errorMessage: { type: String, default: null },
+  fileSize: { type: Number, default: null }
+}, { timestamps: true });
+
 async function getQuestionModel() {
   const conn = await connectQuestionDB();
   const Counter = conn.models.Counter || conn.model('Counter', CounterSchema, 'counters');
@@ -172,6 +203,11 @@ async function getTIPModel() {
   return conn.models.TodayInPast || conn.model('TodayInPast', TodayInPastSchema, 'today_in_past');
 }
 
+async function getDataHisModel() {
+  const conn = await connectDataHisDB();
+  return conn.models.UploadHistory || conn.model('UploadHistory', UploadHistorySchema, 'upload_history');
+}
+
 async function getNextSequence(Counter, count = 1) {
   const result = await Counter.findOneAndUpdate(
     { _id: 'questions_pcsquestions' },
@@ -179,6 +215,41 @@ async function getNextSequence(Counter, count = 1) {
     { new: true, upsert: true }
   );
   return result.seq - count + 1;
+}
+
+async function logUploadHistory(entry) {
+  try {
+    const UploadHistory = await getDataHisModel();
+    await UploadHistory.create(entry);
+  } catch (error) {
+    console.error('Upload History Log Error:', error.message);
+  }
+}
+
+function chunkArray(arr, size) {
+  const chunks = [];
+  for (let i = 0; i < arr.length; i += size) {
+    chunks.push(arr.slice(i, i + size));
+  }
+  return chunks;
+}
+
+async function fastInsertMany(Model, docs, chunkSize = 2000) {
+  if (docs.length === 0) return [];
+  const batches = chunkArray(docs, chunkSize);
+  const results = await Promise.all(
+    batches.map(batch => Model.insertMany(batch, { ordered: false }))
+  );
+  return results.flat();
+}
+
+function extractUploadPayload(req) {
+  if (req.file) {
+    const text = req.file.buffer.toString('utf-8');
+    const parsed = JSON.parse(text);
+    return { data: parsed, source: 'file', fileName: req.file.originalname, fileSize: req.file.size };
+  }
+  return { data: req.body, source: 'paste', fileName: null, fileSize: null };
 }
 
 const authMiddleware = (req, res, next) => {
@@ -237,20 +308,30 @@ app.get('/api/admin/questions/batch/:batchId/full', authMiddleware, async (req, 
   }
 });
 
-app.post('/api/admin/questions', authMiddleware, async (req, res) => {
+app.post('/api/admin/questions', authMiddleware, upload.single('file'), async (req, res) => {
+  let payload;
+  try {
+    payload = extractUploadPayload(req);
+  } catch (error) {
+    return res.status(400).json({ error: 'Invalid JSON file' });
+  }
+  const { data, source, fileName, fileSize } = payload;
   try {
     const { Counter, PcsQuestion } = await getQuestionModel();
-    const data = req.body;
     const batchId = `batch_${Date.now()}`;
 
     if (Array.isArray(data)) {
-      if (data.length === 0) return res.json({ message: 'No questions', count: 0 });
+      if (data.length === 0) {
+        await logUploadHistory({ fileName, uploadType: 'questions', source, count: 0, batchId, status: 'success', fileSize });
+        return res.json({ message: 'No questions', count: 0 });
+      }
       const startId = await getNextSequence(Counter, data.length);
       const preparedQuestions = data.map((q, index) => {
         const { _id, question_id, id, ...rest } = q;
         return { ...rest, _id: startId + index, batchId, subject: rest.subject || 'Uncategorized' };
       });
-      await PcsQuestion.insertMany(preparedQuestions);
+      await fastInsertMany(PcsQuestion, preparedQuestions);
+      await logUploadHistory({ fileName, uploadType: 'questions', source, count: data.length, batchId, status: 'success', fileSize });
       return res.json({ message: 'Questions uploaded successfully', count: data.length, batchId, idRange: { start: startId, end: startId + data.length - 1 } });
     }
 
@@ -258,9 +339,11 @@ app.post('/api/admin/questions', authMiddleware, async (req, res) => {
     const { _id, question_id, id, ...rest } = data;
     const doc = new PcsQuestion({ ...rest, _id: startId, batchId, subject: rest.subject || 'Uncategorized' });
     await doc.save();
+    await logUploadHistory({ fileName, uploadType: 'questions', source, count: 1, batchId, status: 'success', fileSize });
     res.json({ message: 'Question added successfully', generatedId: startId });
   } catch (error) {
     console.error('Upload Error:', error);
+    await logUploadHistory({ fileName, uploadType: 'questions', source, count: Array.isArray(data) ? data.length : 1, status: 'failed', errorMessage: error.message, fileSize });
     res.status(500).json({ error: error.message });
   }
 });
@@ -339,22 +422,34 @@ app.delete('/api/admin/questions/batch/:batchId', authMiddleware, async (req, re
   }
 });
 
-app.post('/api/admin/current-affairs', authMiddleware, async (req, res) => {
+app.post('/api/admin/current-affairs', authMiddleware, upload.single('file'), async (req, res) => {
+  let payload;
+  try {
+    payload = extractUploadPayload(req);
+  } catch (error) {
+    return res.status(400).json({ error: 'Invalid JSON file' });
+  }
+  const { data, source, fileName, fileSize } = payload;
   try {
     const CurrentAffair = await getCAModel();
-    const data = req.body;
 
     if (Array.isArray(data)) {
-      if (data.length === 0) return res.json({ message: 'No items', count: 0 });
-      const docs = await CurrentAffair.insertMany(data);
+      if (data.length === 0) {
+        await logUploadHistory({ fileName, uploadType: 'current-affairs', source, count: 0, status: 'success', fileSize });
+        return res.json({ message: 'No items', count: 0 });
+      }
+      const docs = await fastInsertMany(CurrentAffair, data);
+      await logUploadHistory({ fileName, uploadType: 'current-affairs', source, count: docs.length, status: 'success', fileSize });
       return res.status(201).json({ message: 'Current affairs uploaded successfully', count: docs.length });
     }
 
     const doc = new CurrentAffair(data);
     await doc.save();
+    await logUploadHistory({ fileName, uploadType: 'current-affairs', source, count: 1, status: 'success', fileSize });
     res.status(201).json({ message: 'Current affair added successfully', data: doc });
   } catch (error) {
     console.error('Current Affairs Upload Error:', error);
+    await logUploadHistory({ fileName, uploadType: 'current-affairs', source, count: Array.isArray(data) ? data.length : 1, status: 'failed', errorMessage: error.message, fileSize });
     res.status(500).json({ error: error.message });
   }
 });
@@ -431,22 +526,34 @@ app.delete('/api/admin/current-affairs', authMiddleware, async (req, res) => {
   }
 });
 
-app.post('/api/admin/important-topics', authMiddleware, async (req, res) => {
+app.post('/api/admin/important-topics', authMiddleware, upload.single('file'), async (req, res) => {
+  let payload;
+  try {
+    payload = extractUploadPayload(req);
+  } catch (error) {
+    return res.status(400).json({ error: 'Invalid JSON file' });
+  }
+  const { data, source, fileName, fileSize } = payload;
   try {
     const ImportantTopic = await getITModel();
-    const data = req.body;
 
     if (Array.isArray(data)) {
-      if (data.length === 0) return res.json({ message: 'No items', count: 0 });
-      const docs = await ImportantTopic.insertMany(data);
+      if (data.length === 0) {
+        await logUploadHistory({ fileName, uploadType: 'important-topics', source, count: 0, status: 'success', fileSize });
+        return res.json({ message: 'No items', count: 0 });
+      }
+      const docs = await fastInsertMany(ImportantTopic, data);
+      await logUploadHistory({ fileName, uploadType: 'important-topics', source, count: docs.length, status: 'success', fileSize });
       return res.status(201).json({ message: 'Important topics uploaded successfully', count: docs.length });
     }
 
     const doc = new ImportantTopic(data);
     await doc.save();
+    await logUploadHistory({ fileName, uploadType: 'important-topics', source, count: 1, status: 'success', fileSize });
     res.status(201).json({ message: 'Important topic added successfully', data: doc });
   } catch (error) {
     console.error('Important Topics Upload Error:', error);
+    await logUploadHistory({ fileName, uploadType: 'important-topics', source, count: Array.isArray(data) ? data.length : 1, status: 'failed', errorMessage: error.message, fileSize });
     res.status(500).json({ error: error.message });
   }
 });
@@ -518,22 +625,34 @@ app.delete('/api/admin/important-topics', authMiddleware, async (req, res) => {
   }
 });
 
-app.post('/api/admin/did-you-know', authMiddleware, async (req, res) => {
+app.post('/api/admin/did-you-know', authMiddleware, upload.single('file'), async (req, res) => {
+  let payload;
+  try {
+    payload = extractUploadPayload(req);
+  } catch (error) {
+    return res.status(400).json({ error: 'Invalid JSON file' });
+  }
+  const { data, source, fileName, fileSize } = payload;
   try {
     const DidYouKnow = await getDYKModel();
-    const data = req.body;
 
     if (Array.isArray(data)) {
-      if (data.length === 0) return res.json({ message: 'No items', count: 0 });
-      const docs = await DidYouKnow.insertMany(data);
+      if (data.length === 0) {
+        await logUploadHistory({ fileName, uploadType: 'did-you-know', source, count: 0, status: 'success', fileSize });
+        return res.json({ message: 'No items', count: 0 });
+      }
+      const docs = await fastInsertMany(DidYouKnow, data);
+      await logUploadHistory({ fileName, uploadType: 'did-you-know', source, count: docs.length, status: 'success', fileSize });
       return res.status(201).json({ message: 'Did You Know items uploaded successfully', count: docs.length });
     }
 
     const doc = new DidYouKnow(data);
     await doc.save();
+    await logUploadHistory({ fileName, uploadType: 'did-you-know', source, count: 1, status: 'success', fileSize });
     res.status(201).json({ message: 'Did You Know item added successfully', data: doc });
   } catch (error) {
     console.error('Did You Know Upload Error:', error);
+    await logUploadHistory({ fileName, uploadType: 'did-you-know', source, count: Array.isArray(data) ? data.length : 1, status: 'failed', errorMessage: error.message, fileSize });
     res.status(500).json({ error: error.message });
   }
 });
@@ -605,22 +724,34 @@ app.delete('/api/admin/did-you-know', authMiddleware, async (req, res) => {
   }
 });
 
-app.post('/api/admin/today-in-past', authMiddleware, async (req, res) => {
+app.post('/api/admin/today-in-past', authMiddleware, upload.single('file'), async (req, res) => {
+  let payload;
+  try {
+    payload = extractUploadPayload(req);
+  } catch (error) {
+    return res.status(400).json({ error: 'Invalid JSON file' });
+  }
+  const { data, source, fileName, fileSize } = payload;
   try {
     const TodayInPast = await getTIPModel();
-    const data = req.body;
 
     if (Array.isArray(data)) {
-      if (data.length === 0) return res.json({ message: 'No items', count: 0 });
-      const docs = await TodayInPast.insertMany(data);
+      if (data.length === 0) {
+        await logUploadHistory({ fileName, uploadType: 'today-in-past', source, count: 0, status: 'success', fileSize });
+        return res.json({ message: 'No items', count: 0 });
+      }
+      const docs = await fastInsertMany(TodayInPast, data);
+      await logUploadHistory({ fileName, uploadType: 'today-in-past', source, count: docs.length, status: 'success', fileSize });
       return res.status(201).json({ message: 'Today In Past items uploaded successfully', count: docs.length });
     }
 
     const doc = new TodayInPast(data);
     await doc.save();
+    await logUploadHistory({ fileName, uploadType: 'today-in-past', source, count: 1, status: 'success', fileSize });
     res.status(201).json({ message: 'Today In Past item added successfully', data: doc });
   } catch (error) {
     console.error('Today In Past Upload Error:', error);
+    await logUploadHistory({ fileName, uploadType: 'today-in-past', source, count: Array.isArray(data) ? data.length : 1, status: 'failed', errorMessage: error.message, fileSize });
     res.status(500).json({ error: error.message });
   }
 });
@@ -695,6 +826,41 @@ app.delete('/api/admin/today-in-past', authMiddleware, async (req, res) => {
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
+});
+
+app.get('/api/admin/upload-history', authMiddleware, async (req, res) => {
+  try {
+    const UploadHistory = await getDataHisModel();
+    const { limit = 50, skip = 0, uploadType, source, status } = req.query;
+
+    const filter = {};
+    if (uploadType) filter.uploadType = uploadType;
+    if (source) filter.source = source;
+    if (status) filter.status = status;
+
+    const [items, total] = await Promise.all([
+      UploadHistory.find(filter).sort({ createdAt: -1 }).skip(parseInt(skip)).limit(parseInt(limit)),
+      UploadHistory.countDocuments(filter)
+    ]);
+
+    res.json({ total, count: items.length, data: items });
+  } catch (error) {
+    console.error('Upload History Fetch Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.use((error, req, res, next) => {
+  if (error instanceof multer.MulterError) {
+    if (error.code === 'LIMIT_FILE_SIZE') {
+      return res.status(400).json({ error: 'File too large. Maximum size is 5MB' });
+    }
+    return res.status(400).json({ error: error.message });
+  }
+  if (error) {
+    return res.status(500).json({ error: error.message });
+  }
+  next();
 });
 
 const PORT = process.env.PORT || 5000;
